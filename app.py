@@ -230,8 +230,27 @@ def inject_css(theme_name: str) -> None:
     }}
     .cal-day {{ color:{t['accent']}; font-weight:800; margin-bottom:6px; }}
     .cal-empty {{ opacity:.25; }}
+    .person-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        width: 100%;
+    }
+    .person-grid .asset-card {
+        margin-bottom: 0;
+        min-width: 0;
+    }
     @media (max-width: 768px) {{
-        .asset-value {{font-size: 24px;}}
+        .asset-value {{font-size: 22px;}}
+        .asset-small {{font-size: 13px !important;}}
+        .person-grid {{
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }}
+        .person-grid .asset-card {{
+            padding: 12px 10px;
+            border-radius: 16px;
+        }}
         .calendar-grid {{ gap: 5px; }}
         .cal-cell {{ min-height: 74px; padding: 6px; font-size: 11px; }}
     }}
@@ -272,7 +291,7 @@ def person_daily_stats(edf: pd.DataFrame, person: str) -> dict[str, int | float]
     }
 
 
-def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
+def person_card_html(label: str, value: str, stats: dict[str, int | float]) -> str:
     today = int(stats.get("today", 0))
     history_gain = int(stats.get("history_gain", 0))
     avg = int(round(float(stats.get("avg", 0))))
@@ -281,7 +300,7 @@ def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
     positive_days = int(stats.get("positive_days", 0))
     total_days = int(stats.get("total_days", 0))
     today_cls = "gain" if today >= 0 else "loss"
-    st.markdown(f"""
+    return f"""
     <div class="asset-card">
         <div class="asset-label">{label}｜每日變化歷史統計</div>
         <div class="asset-value">{value}</div>
@@ -294,8 +313,11 @@ def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
             上升天數：{positive_days}/{total_days}
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
 
+
+def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
+    st.markdown(person_card_html(label, value, stats), unsafe_allow_html=True)
 
 def upsert_record(df: pd.DataFrame, record_date: date, values: dict[str, int]) -> pd.DataFrame:
     new = pd.DataFrame([{ "日期": record_date, **values }])
@@ -346,13 +368,15 @@ edf = enrich(raw_df)
 st.title(f"{APP_ICON} {APP_TITLE}")
 nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "設定", "使用說明"]
 st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
-nav_cols = st.columns(len(nav_pages))
-for i, nav in enumerate(nav_pages):
-    with nav_cols[i]:
-        label = ("✅ " if st.session_state.page == nav else "") + nav
-        if st.button(label, key=f"nav_{nav}", use_container_width=True):
-            st.session_state.page = nav
-            st.rerun()
+# 手機版固定 2 個按鈕一排，避免選單橫向擠壓或變成側邊欄。
+for start_idx in range(0, len(nav_pages), 2):
+    nav_cols = st.columns(2)
+    for offset, nav in enumerate(nav_pages[start_idx:start_idx + 2]):
+        with nav_cols[offset]:
+            label = ("✅ " if st.session_state.page == nav else "") + nav
+            if st.button(label, key=f"nav_{nav}", use_container_width=True):
+                st.session_state.page = nav
+                st.rerun()
 st.markdown('</div>', unsafe_allow_html=True)
 
 with st.expander("🎨 介面配色", expanded=False):
@@ -385,15 +409,11 @@ if page == "首頁總覽":
         st.caption("歷年累計增減＝從第一筆紀錄開始，逐日累計『與前一天相比』的總變化；第一筆沒有前一天，因此從 0 開始計算。")
 
         st.markdown("### 四人資產與每日變化歷史統計")
-        # 手機友善 2×2 大卡片排列：第一排 憲、萱；第二排 傑、文
-        row1 = st.columns(2)
-        for i, p in enumerate(PEOPLE[:2]):
-            with row1[i]:
-                person_card(p, money(latest[p]), person_daily_stats(edf, p))
-        row2 = st.columns(2)
-        for i, p in enumerate(PEOPLE[2:]):
-            with row2[i]:
-                person_card(p, money(latest[p]), person_daily_stats(edf, p))
+        # 手機與電腦都固定 2×2：第一排 憲、萱；第二排 傑、文
+        cards_html = '<div class="person-grid">' + ''.join([
+            person_card_html(p, money(latest[p]), person_daily_stats(edf, p)) for p in PEOPLE
+        ]) + '</div>'
+        st.markdown(cards_html, unsafe_allow_html=True)
 
         st.markdown("### 總資產走勢")
         fig = px.line(edf, x="日期_dt", y="總資產", markers=True, labels={"日期_dt":"日期", "總資產":"總資產"})
