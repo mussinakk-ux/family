@@ -230,16 +230,16 @@ def inject_css(theme_name: str) -> None:
     }}
     .cal-day {{ color:{t['accent']}; font-weight:800; margin-bottom:6px; }}
     .cal-empty {{ opacity:.25; }}
-    .person-grid {
+    .person-grid {{
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 14px;
         width: 100%;
-    }
-    .person-grid .asset-card {
+    }}
+    .person-grid .asset-card {{
         margin-bottom: 0;
         min-width: 0;
-    }
+    }}
     @media (max-width: 768px) {{
         .asset-value {{font-size: 22px;}}
         .asset-small {{font-size: 13px !important;}}
