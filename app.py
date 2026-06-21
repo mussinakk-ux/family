@@ -9,9 +9,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_TITLE = "家庭資產管理系統 v2.4"
-PEOPLE = ["萱", "憲", "傑", "文"]
-PERSON_COLORS = {"萱": "#FFD700", "憲": "#00C853", "傑": "#42A5F5", "文": "#BA68C8"}
+APP_TITLE = "$億萬富翁家庭資產"
+PEOPLE = ["憲", "萱", "傑", "文"]
+PERSON_COLORS = {"憲": "#00C853", "萱": "#FFD700", "傑": "#42A5F5", "文": "#BA68C8"}
 TOTAL_COLOR = "#FFD700"
 COLUMNS = ["日期", *PEOPLE]
 DATA_FILE = Path("data.csv")
@@ -47,7 +47,7 @@ def money(v) -> str:
 def signed(v) -> str:
     try:
         n = int(round(float(v)))
-        return ("+" if n >= 0 else "") + f"{n:,}"
+        return ("+" if n >= 0 else "") + f"{abs(n):,}" if n >= 0 else f"-{abs(n):,}"
     except Exception:
         return "+0"
 
@@ -320,8 +320,6 @@ raw_df = load_data()
 edf = enrich(raw_df)
 
 st.title(f"💰 {APP_TITLE}")
-st.caption("單純記錄四人資產數值：萱、憲、傑、文。可新增、修改、刪除、匯出與匯入。")
-
 nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "使用說明"]
 st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
 nav_cols = st.columns(len(nav_pages))
@@ -360,9 +358,14 @@ if page == "首頁總覽":
         st.caption("歷年累計增減＝從第一筆紀錄開始，逐日累計『與前一天相比』的總變化；第一筆沒有前一天，因此從 0 開始計算。")
 
         st.markdown("### 四人資產與每日變化歷史統計")
-        cols = st.columns(4)
-        for i, p in enumerate(PEOPLE):
-            with cols[i]:
+        # 手機友善 2×2 大卡片排列：第一排 憲、萱；第二排 傑、文
+        row1 = st.columns(2)
+        for i, p in enumerate(PEOPLE[:2]):
+            with row1[i]:
+                person_card(p, money(latest[p]), person_daily_stats(edf, p))
+        row2 = st.columns(2)
+        for i, p in enumerate(PEOPLE[2:]):
+            with row2[i]:
                 person_card(p, money(latest[p]), person_daily_stats(edf, p))
 
         st.markdown("### 總資產走勢")
@@ -467,7 +470,7 @@ elif page == "匯入／匯出":
     st.divider()
     st.subheader("匯入 CSV")
     st.warning("匯入後會覆蓋目前 data.csv。請先下載備份。")
-    uploaded = st.file_uploader("選擇 CSV 檔，欄位需包含：日期、萱、憲、傑、文", type=["csv"])
+    uploaded = st.file_uploader("選擇 CSV 檔，欄位需包含：日期、憲、萱、傑、文", type=["csv"])
     if uploaded is not None:
         if st.button("確認匯入並覆蓋"):
             content = uploaded.getvalue()
@@ -498,7 +501,7 @@ elif page == "匯入／匯出":
 else:
     st.subheader("使用說明")
     st.markdown("""
-    1. 到 **新增／修改** 輸入每天四個人的資產：萱、憲、傑、文。  
+    1. 到 **新增／修改** 輸入每天四個人的資產：憲、萱、傑、文。  
     2. 同一天重新儲存會直接覆蓋舊數字。  
     3. 首頁會自動計算總資產、較前一筆、本月、本年增減。  
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
