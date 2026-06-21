@@ -1,259 +1,576 @@
+
 import streamlit as st
 import pandas as pd
+import sqlite3
+from datetime import datetime, date
 from pathlib import Path
-from datetime import date, datetime
-from io import BytesIO
-import plotly.express as px
 
-APP_TITLE = "家庭資產管理系統 v2.0"
-PEOPLE = ["萱", "憲", "傑", "文"]
-DATA_FILE = Path("data.csv")
-COLUMNS = ["日期", *PEOPLE]
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
-st.set_page_config(page_title=APP_TITLE, page_icon="💰", layout="wide", initial_sidebar_state="collapsed")
+DB_PATH = Path("investment_data.db")
+DEFAULT_PASSWORD = "1688"
 
-THEMES = {
-    "黑金尊爵版": {
-        "bg1": "#060606", "bg2": "#14100a", "card": "rgba(22,20,16,.92)", "border": "#c9a646",
-        "text": "#f8f1d0", "muted": "#b6a876", "accent": "#f3cc58", "accent2": "#7d621c",
-        "good": "#28d17c", "bad": "#ff5c5c", "input": "#111111"
-    },
-    "招財綠金版": {
-        "bg1": "#021d16", "bg2": "#063827", "card": "rgba(5,47,34,.92)", "border": "#d8b85a",
-        "text": "#fff6cf", "muted": "#cdbf80", "accent": "#ffd86b", "accent2": "#0f7b4d",
-        "good": "#63f2a1", "bad": "#ff6868", "input": "#05281e"
-    }
-}
+DEFAULT_HOLDINGS = [
+    {"account":"富邦銀行｜退休帳戶","purpose":"退休長期","market":"TW","currency":"TWD","symbol":"00947","name":"台新臺灣IC設計動能ETF","shares":1004.0,"cost":25.78,"price":25.78},
+    {"account":"富邦銀行｜退休帳戶","purpose":"退休長期","market":"US","currency":"USD","symbol":"SOXQ","name":"Invesco費城半導體ETF","shares":2.0,"cost":94.685,"price":94.685},
+    {"account":"國泰銀行｜價差帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"1310","name":"台苯","shares":1000.0,"cost":9.52,"price":9.52},
+    {"account":"國泰銀行｜價差帳戶","purpose":"核心長期","market":"TW","currency":"TWD","symbol":"2330","name":"台積電","shares":20.0,"cost":1778.5,"price":1778.5},
+    {"account":"國泰銀行｜價差帳戶","purpose":"現金","market":"CASH","currency":"TWD","symbol":"CASH_CTBC","name":"國泰價差戶現金","shares":1.0,"cost":0.0,"price":0.0},
+    {"account":"永豐銀行｜核心帳戶","purpose":"核心長期","market":"TW","currency":"TWD","symbol":"00631L","name":"元大台灣50正2","shares":4070.0,"cost":26.66,"price":38.33},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"00830","name":"國泰費城半導體ETF","shares":1056.0,"cost":81.77,"price":81.77},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"2302","name":"麗正","shares":1000.0,"cost":19.53,"price":19.53},
+    {"account":"永豐銀行｜核心帳戶","purpose":"核心長期","market":"TW","currency":"TWD","symbol":"2330","name":"台積電","shares":510.0,"cost":489.14,"price":1778.5},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"2337","name":"旺宏","shares":1000.0,"cost":149.71,"price":149.71},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"2408","name":"南亞科","shares":200.0,"cost":227.32,"price":227.32},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"3491","name":"昇達科","shares":5.0,"cost":1557.20,"price":1557.20},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"6116","name":"彩晶","shares":3000.0,"cost":10.31,"price":10.31},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"6558","name":"興能高","shares":2000.0,"cost":36.0,"price":36.0},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"6603","name":"富強鑫","shares":1000.0,"cost":26.64,"price":26.64},
+    {"account":"永豐銀行｜核心帳戶","purpose":"價差操作","market":"TW","currency":"TWD","symbol":"6770","name":"力積電","shares":1000.0,"cost":63.79,"price":63.79},
+    {"account":"永豐銀行｜核心帳戶","purpose":"核心長期","market":"US","currency":"USD","symbol":"NVDA","name":"NVIDIA","shares":1.0,"cost":142.95,"price":142.95},
+    {"account":"永豐銀行｜核心帳戶","purpose":"退休長期","market":"US","currency":"USD","symbol":"QQQ","name":"Invesco QQQ","shares":1.55011,"cost":645.15,"price":645.15},
+]
 
-def money(v):
+st.set_page_config(page_title="投資總控 Pro v3", page_icon="💼", layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+.stApp{background:#F8F5EF;}
+.block-container{padding-top:1rem;padding-bottom:4rem;}
+[data-testid="stMetric"]{background:#FFFDF8;padding:18px;border-radius:20px;border:1px solid #E8E0D0;box-shadow:0 4px 14px rgba(0,0,0,.05);}
+section[data-testid="stSidebar"]{background:#F3EEE4;}
+div[data-testid="stDataFrame"]{background:#FFFDF8;border-radius:16px;}
+h1{color:#4B443C;font-weight:800;} h2{color:#5A5248;} h3{color:#6B6258;}
+p,label,span{color:#5A5248;}
+.stTabs [data-baseweb="tab-list"]{gap:8px;}
+.stTabs [data-baseweb="tab"]{background:#FFFDF8;border-radius:999px;padding:9px 18px;color:#5A5248;border:1px solid #E8E0D0;}
+.stTabs [aria-selected="true"]{background:#EADCC4!important;color:#3F382F!important;}
+.stButton>button{background:#D9C8A9;color:white;border:none;border-radius:15px;font-weight:700;padding:.6rem 1rem;}
+.stButton>button:hover{background:#CDB894;color:white;border:none;}
+.stDownloadButton>button{background:#C8B28A;color:white;border:none;border-radius:15px;font-weight:700;}
+.stDownloadButton>button:hover{background:#B89E74;color:white;}
+input,textarea,select{border-radius:12px!important;}
+div[data-testid="stAlert"]{border-radius:15px;}
+@media(max-width:768px){.block-container{padding-left:.8rem;padding-right:.8rem;}}
+</style>
+""", unsafe_allow_html=True)
+
+def app_password():
     try:
-        return f"{int(round(float(v))):,}"
+        return st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
     except Exception:
-        return "0"
+        return DEFAULT_PASSWORD
 
-def signed(v):
-    try:
-        v = int(round(float(v)))
-        return ("+" if v >= 0 else "") + f"{v:,}"
-    except Exception:
-        return "+0"
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if st.session_state.authenticated:
+        return True
+    st.title("💼 投資總控 Pro v3")
+    st.info("請輸入密碼後使用。預設密碼是 1688。")
+    pw = st.text_input("密碼", type="password")
+    if st.button("登入"):
+        if pw == app_password():
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("密碼錯誤")
+    return False
 
-def load_data():
-    if DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
-        df = pd.read_csv(DATA_FILE)
-    else:
-        df = pd.DataFrame(columns=COLUMNS)
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = 0 if col != "日期" else ""
-    df = df[COLUMNS]
-    if not df.empty:
-        df["日期"] = pd.to_datetime(df["日期"], errors="coerce").dt.date
-        df = df.dropna(subset=["日期"])
-        for p in PEOPLE:
-            df[p] = pd.to_numeric(df[p], errors="coerce").fillna(0).astype(int)
-        df = df.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
+def connect():
+    return sqlite3.connect(DB_PATH)
+
+def ensure_columns(conn):
+    cur = conn.cursor()
+    for table, additions in {
+        "trade_logs": {
+            "qty":"REAL DEFAULT 0", "price":"REAL DEFAULT 0", "buy_fee":"REAL DEFAULT 0",
+            "sell_fee":"REAL DEFAULT 0", "tax":"REAL DEFAULT 0", "realized_profit":"REAL DEFAULT 0",
+            "cash_flow":"REAL DEFAULT 0"
+        },
+        "daily_assets": {
+            "realized_profit":"REAL DEFAULT 0", "unrealized_profit":"REAL DEFAULT 0",
+            "total_fee":"REAL DEFAULT 0", "dividend_income":"REAL DEFAULT 0", "cash_total":"REAL DEFAULT 0"
+        }
+    }.items():
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = [x[1] for x in cur.fetchall()]
+        for c, spec in additions.items():
+            if c not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {c} {spec}")
+    conn.commit()
+
+def init_db():
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS holdings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT,purpose TEXT,market TEXT,currency TEXT,symbol TEXT,name TEXT,
+        shares REAL,cost REAL,price REAL,last_update TEXT
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_date TEXT UNIQUE,total_asset REAL,total_cost REAL,total_profit REAL,
+        realized_profit REAL DEFAULT 0,unrealized_profit REAL DEFAULT 0,total_fee REAL DEFAULT 0,
+        dividend_income REAL DEFAULT 0,cash_total REAL DEFAULT 0
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS trade_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_date TEXT,account TEXT,symbol TEXT,action TEXT,note TEXT,
+        qty REAL DEFAULT 0,price REAL DEFAULT 0,buy_fee REAL DEFAULT 0,
+        sell_fee REAL DEFAULT 0,tax REAL DEFAULT 0,realized_profit REAL DEFAULT 0,cash_flow REAL DEFAULT 0
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dividends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pay_date TEXT,account TEXT,symbol TEXT,amount REAL,tax REAL DEFAULT 0,note TEXT
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS family_assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_date TEXT UNIQUE,
+        xuan REAL DEFAULT 0,
+        xian REAL DEFAULT 0,
+        jie REAL DEFAULT 0,
+        wen REAL DEFAULT 0,
+        total REAL DEFAULT 0
+    )""")
+    cur.execute("SELECT COUNT(*) FROM family_assets")
+    if cur.fetchone()[0] == 0 and Path("family_asset_records.csv").exists():
+        try:
+            fam = pd.read_csv("family_asset_records.csv")
+            fam = fam.dropna(subset=["日期"])
+            for _, r in fam.iterrows():
+                total = float(r.get("萱",0) or 0) + float(r.get("憲",0) or 0) + float(r.get("傑",0) or 0) + float(r.get("文",0) or 0)
+                cur.execute("""
+                INSERT OR REPLACE INTO family_assets (record_date,xuan,xian,jie,wen,total)
+                VALUES (?,?,?,?,?,?)
+                """, (str(r.get("日期")), float(r.get("萱",0) or 0), float(r.get("憲",0) or 0), float(r.get("傑",0) or 0), float(r.get("文",0) or 0), total))
+        except Exception:
+            pass
+    ensure_columns(conn)
+    cur.execute("SELECT COUNT(*) FROM holdings")
+    if cur.fetchone()[0] == 0:
+        for h in DEFAULT_HOLDINGS:
+            cur.execute("""
+            INSERT INTO holdings (account,purpose,market,currency,symbol,name,shares,cost,price,last_update)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (h["account"],h["purpose"],h["market"],h["currency"],h["symbol"],h["name"],h["shares"],h["cost"],h["price"],"預設"))
+    conn.commit()
+    conn.close()
+
+def load_table(table, order="id DESC"):
+    conn = connect()
+    df = pd.read_sql_query(f"SELECT * FROM {table} ORDER BY {order}", conn)
+    conn.close()
     return df
 
-def save_data(df):
-    out = df.copy()
-    if not out.empty:
-        out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
-    out.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
+def load_family_assets():
+    conn = connect()
+    df = pd.read_sql_query("SELECT * FROM family_assets ORDER BY record_date DESC", conn)
+    conn.close()
+    return df
 
-def enrich(df):
-    if df.empty:
-        return df.copy()
-    out = df.copy()
-    out["日期_dt"] = pd.to_datetime(out["日期"])
-    out["總資產"] = out[PEOPLE].sum(axis=1)
-    out["每日增減"] = out["總資產"].diff().fillna(0).astype(int)
-    out["月份"] = out["日期_dt"].dt.strftime("%Y-%m")
-    out["年度"] = out["日期_dt"].dt.year.astype(str)
-    return out
+def upsert_family_asset(record_date, xuan, xian, jie, wen):
+    total = float(xuan) + float(xian) + float(jie) + float(wen)
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT INTO family_assets (record_date,xuan,xian,jie,wen,total)
+    VALUES (?,?,?,?,?,?)
+    ON CONFLICT(record_date) DO UPDATE SET
+      xuan=excluded.xuan,
+      xian=excluded.xian,
+      jie=excluded.jie,
+      wen=excluded.wen,
+      total=excluded.total
+    """, (record_date, xuan, xian, jie, wen, total))
+    conn.commit()
+    conn.close()
 
-def inject_css(theme_name):
-    t = THEMES[theme_name]
-    st.markdown(f"""
-    <style>
-    .stApp {{
-        background: radial-gradient(circle at top left, {t['accent2']} 0, {t['bg2']} 28%, {t['bg1']} 100%);
-        color: {t['text']};
-    }}
-    [data-testid="stHeader"] {{ background: transparent; }}
-    [data-testid="stSidebar"] {{ background: {t['bg1']}; }}
-    .main-title {{font-size: 2.1rem; font-weight: 900; color:{t['accent']}; letter-spacing:.04em; margin-bottom:.2rem;}}
-    .subtle {{color:{t['muted']}; font-size:.95rem;}}
-    .asset-card {{
-        border: 1px solid {t['border']}; border-radius: 20px; padding: 18px 18px;
-        background: linear-gradient(145deg, {t['card']}, rgba(0,0,0,.45));
-        box-shadow: 0 10px 30px rgba(0,0,0,.28); margin-bottom: 12px;
-    }}
-    .metric-label {{color:{t['muted']}; font-size:.9rem;}}
-    .metric-value {{color:{t['text']}; font-size:1.75rem; font-weight:900;}}
-    .big-value {{color:{t['accent']}; font-size:2.45rem; font-weight:900;}}
-    .good {{color:{t['good']}; font-weight:800;}}
-    .bad {{color:{t['bad']}; font-weight:800;}}
-    .stButton>button, .stDownloadButton>button {{
-        background: linear-gradient(135deg, {t['accent']}, #9c7827); color:#17120a; border:0; border-radius:14px;
-        font-weight:900; padding:.65rem 1rem;
-    }}
-    input, textarea, [data-baseweb="input"] {{ background:{t['input']} !important; color:{t['text']} !important; }}
-    div[data-testid="stDataFrame"] {{ border: 1px solid {t['border']}; border-radius: 16px; overflow:hidden; }}
-    </style>
-    """, unsafe_allow_html=True)
+def load_holdings():
+    conn = connect()
+    df = pd.read_sql_query("SELECT * FROM holdings", conn)
+    conn.close()
+    return df
 
-def card(label, value, sub="", cls=""):
-    st.markdown(f"""<div class='asset-card'><div class='metric-label'>{label}</div><div class='{cls or 'metric-value'}'>{value}</div><div class='subtle'>{sub}</div></div>""", unsafe_allow_html=True)
+def save_holdings(df):
+    conn = connect()
+    df.to_sql("holdings", conn, if_exists="replace", index=False)
+    conn.close()
 
-def to_excel_bytes(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        export = df.copy()
-        if not export.empty and "日期_dt" in export.columns:
-            export = export.drop(columns=["日期_dt"])
-        export.to_excel(writer, index=False, sheet_name="資產紀錄")
-    return output.getvalue()
+def add_log(log_date, account, symbol, action, note, qty, price, buy_fee, sell_fee, tax, realized_profit, cash_flow):
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT INTO trade_logs (log_date,account,symbol,action,note,qty,price,buy_fee,sell_fee,tax,realized_profit,cash_flow)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+    (log_date,account,symbol,action,note,qty,price,buy_fee,sell_fee,tax,realized_profit,cash_flow))
+    conn.commit()
+    conn.close()
 
-def build_calendar(df, selected_month):
-    if df.empty:
-        return pd.DataFrame()
-    mdf = df[df["月份"] == selected_month].copy()
-    if mdf.empty:
-        return pd.DataFrame()
-    mdf["日"] = mdf["日期_dt"].dt.day
-    return mdf[["日期", "日", *PEOPLE, "總資產", "每日增減"]]
+def add_dividend(pay_date, account, symbol, amount, tax, note):
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO dividends (pay_date,account,symbol,amount,tax,note) VALUES (?,?,?,?,?,?)",
+                (pay_date,account,symbol,amount,tax,note))
+    conn.commit()
+    conn.close()
 
-theme = st.sidebar.radio("配色", list(THEMES.keys()), horizontal=False)
-inject_css(theme)
+def save_daily_asset(total_asset,total_cost,total_profit,realized_profit,unrealized_profit,total_fee,dividend_income,cash_total):
+    conn = connect()
+    cur = conn.cursor()
+    d = date.today().isoformat()
+    cur.execute("""
+    INSERT INTO daily_assets (record_date,total_asset,total_cost,total_profit,realized_profit,unrealized_profit,total_fee,dividend_income,cash_total)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(record_date) DO UPDATE SET
+      total_asset=excluded.total_asset,total_cost=excluded.total_cost,total_profit=excluded.total_profit,
+      realized_profit=excluded.realized_profit,unrealized_profit=excluded.unrealized_profit,total_fee=excluded.total_fee,
+      dividend_income=excluded.dividend_income,cash_total=excluded.cash_total
+    """,(d,total_asset,total_cost,total_profit,realized_profit,unrealized_profit,total_fee,dividend_income,cash_total))
+    conn.commit()
+    conn.close()
 
-st.markdown(f"<div class='main-title'>{APP_TITLE}</div><div class='subtle'>單純記錄四人資產數值：萱、憲、傑、文。可新增、修改、刪除、匯出。</div>", unsafe_allow_html=True)
+def yahoo_symbol(row):
+    sym = str(row["symbol"]).upper().strip()
+    if row["market"] == "US":
+        return sym
+    if row["market"] == "CASH":
+        return None
+    return f"{sym}.TW"
 
-df = load_data()
-edf = enrich(df)
+def fetch_price(row):
+    if yf is None or row["market"] == "CASH":
+        return None
+    try:
+        data = yf.Ticker(yahoo_symbol(row)).history(period="5d")
+        if not data.empty:
+            return float(data["Close"].dropna().iloc[-1])
+    except Exception:
+        pass
+    if row["market"] == "TW":
+        try:
+            data = yf.Ticker(f'{str(row["symbol"]).upper().strip()}.TWO').history(period="5d")
+            if not data.empty:
+                return float(data["Close"].dropna().iloc[-1])
+        except Exception:
+            pass
+    return None
+
+def fetch_usd_twd():
+    if yf is None:
+        return 32.0
+    try:
+        data = yf.Ticker("TWD=X").history(period="5d")
+        if not data.empty:
+            return float(data["Close"].dropna().iloc[-1])
+    except Exception:
+        pass
+    return 32.0
+
+def calc_values(df, usd_twd):
+    df = df.copy()
+    fx = df["currency"].map(lambda x: usd_twd if x == "USD" else 1.0)
+    df["台幣市值"] = df["shares"] * df["price"] * fx
+    df["台幣成本"] = df["shares"] * df["cost"] * fx
+    cash_mask = df["market"].eq("CASH")
+    df.loc[cash_mask, "台幣市值"] = df.loc[cash_mask, "price"] * fx[cash_mask]
+    df.loc[cash_mask, "台幣成本"] = df.loc[cash_mask, "cost"] * fx[cash_mask]
+    df["未實現損益"] = df["台幣市值"] - df["台幣成本"]
+    df["報酬率"] = df["未實現損益"] / df["台幣成本"].replace(0, pd.NA) * 100
+    return df
+
+def money(x):
+    return f"{x:,.0f}"
+
+def realized_summary(logs):
+    if logs.empty:
+        return 0,0,0,0,0
+    realized = logs["realized_profit"].fillna(0).sum()
+    total_fee = logs["buy_fee"].fillna(0).sum() + logs["sell_fee"].fillna(0).sum() + logs["tax"].fillna(0).sum()
+    tax = logs["tax"].fillna(0).sum()
+    net = realized - total_fee
+    cash_flow = logs["cash_flow"].fillna(0).sum()
+    return realized,total_fee,tax,net,cash_flow
+
+def dividend_summary(divs):
+    if divs.empty:
+        return 0,0,0
+    gross = divs["amount"].fillna(0).sum()
+    tax = divs["tax"].fillna(0).sum()
+    net = gross - tax
+    return gross,tax,net
+
+if not check_password():
+    st.stop()
+
+init_db()
+df = load_holdings()
+logs = load_table("trade_logs", "log_date DESC,id DESC")
+divs = load_table("dividends", "pay_date DESC,id DESC")
 
 with st.sidebar:
-    st.header("功能")
-    page = st.radio("選單", ["總覽", "新增/修改", "歷史紀錄", "月曆", "匯入/匯出", "使用說明"])
-    st.caption("部署到 Streamlit Cloud 後，用手機瀏覽器開啟網址即可加入主畫面。")
-
-if page == "總覽":
-    if edf.empty:
-        st.info("目前沒有紀錄，請到「新增/修改」輸入第一筆資料。")
-    else:
-        last = edf.iloc[-1]
-        today_delta = int(last["每日增減"])
-        this_month = last["月份"]
-        this_year = last["年度"]
-        month_df = edf[edf["月份"] == this_month]
-        year_df = edf[edf["年度"] == this_year]
-        month_delta = int(month_df.iloc[-1]["總資產"] - month_df.iloc[0]["總資產"]) if len(month_df) > 1 else 0
-        year_delta = int(year_df.iloc[-1]["總資產"] - year_df.iloc[0]["總資產"]) if len(year_df) > 1 else 0
-        c1, c2, c3 = st.columns(3)
-        with c1: card("目前總資產", money(last["總資產"]), f"最新日期：{last['日期']}", "big-value")
-        with c2: card("今日增減", signed(today_delta), "與前一筆紀錄比較", "metric-value good" if today_delta >= 0 else "metric-value bad")
-        with c3: card("本月 / 本年", f"{signed(month_delta)} / {signed(year_delta)}", f"{this_month} / {this_year}")
-        cols = st.columns(4)
-        for i, p in enumerate(PEOPLE):
-            with cols[i]: card(p, money(last[p]), "個人目前資產")
-        chart_df = edf[["日期_dt", "總資產", *PEOPLE]].melt(id_vars="日期_dt", var_name="項目", value_name="金額")
-        fig = px.line(chart_df, x="日期_dt", y="金額", color="項目", markers=True, title="資產走勢")
-        fig.update_layout(template="plotly_dark", height=420, margin=dict(l=10,r=10,t=50,b=10))
-        st.plotly_chart(fig, use_container_width=True)
-
-elif page == "新增/修改":
-    st.subheader("新增或修改每日資產")
-    default_date = date.today()
-    if not df.empty:
-        default_date = df.iloc[-1]["日期"]
-    selected_date = st.date_input("日期", value=default_date)
-    existing = df[df["日期"] == selected_date]
-    values = {p: int(existing.iloc[0][p]) if not existing.empty else 0 for p in PEOPLE}
-    c1, c2 = st.columns(2)
-    with c1:
-        v1 = st.number_input("萱", min_value=0, value=values["萱"], step=1000, format="%d")
-        v3 = st.number_input("傑", min_value=0, value=values["傑"], step=1000, format="%d")
-    with c2:
-        v2 = st.number_input("憲", min_value=0, value=values["憲"], step=1000, format="%d")
-        v4 = st.number_input("文", min_value=0, value=values["文"], step=1000, format="%d")
-    st.markdown(f"### 本日總資產：{money(v1+v2+v3+v4)}")
-    b1, b2 = st.columns(2)
-    if b1.button("儲存 / 更新", use_container_width=True):
-        new_row = pd.DataFrame([{"日期": selected_date, "萱": int(v1), "憲": int(v2), "傑": int(v3), "文": int(v4)}])
-        nd = pd.concat([df[df["日期"] != selected_date], new_row], ignore_index=True)
-        nd = nd.sort_values("日期").reset_index(drop=True)
-        save_data(nd)
-        st.success("已儲存。")
-        st.rerun()
-    if b2.button("刪除此日期", use_container_width=True):
-        nd = df[df["日期"] != selected_date]
-        save_data(nd)
-        st.warning("已刪除。")
-        st.rerun()
-
-elif page == "歷史紀錄":
-    st.subheader("歷史紀錄")
-    if edf.empty:
-        st.info("尚無資料。")
-    else:
-        show = edf[["日期", *PEOPLE, "總資產", "每日增減", "月份", "年度"]].copy()
-        st.dataframe(show, use_container_width=True, hide_index=True)
-        monthly = edf.groupby("月份").agg(月初資產=("總資產","first"), 月末資產=("總資產","last")).reset_index()
-        monthly["月增減"] = monthly["月末資產"] - monthly["月初資產"]
-        st.subheader("月總計")
-        st.dataframe(monthly, use_container_width=True, hide_index=True)
-        yearly = edf.groupby("年度").agg(年初資產=("總資產","first"), 年末資產=("總資產","last")).reset_index()
-        yearly["年增減"] = yearly["年末資產"] - yearly["年初資產"]
-        st.subheader("年總計")
-        st.dataframe(yearly, use_container_width=True, hide_index=True)
-
-elif page == "月曆":
-    st.subheader("日曆顯示")
-    if edf.empty:
-        st.info("尚無資料。")
-    else:
-        months = sorted(edf["月份"].unique(), reverse=True)
-        selected_month = st.selectbox("選擇月份", months)
-        cal = build_calendar(edf, selected_month)
-        st.dataframe(cal, use_container_width=True, hide_index=True)
-        st.caption("每日增減是和前一筆紀錄比較，不是和同月第一天比較。")
-
-elif page == "匯入/匯出":
-    st.subheader("匯出備份")
-    if edf.empty:
-        st.info("尚無資料可匯出。")
-    else:
-        export_df = edf[["日期", *PEOPLE, "總資產", "每日增減", "月份", "年度"]]
-        st.download_button("下載 CSV", export_df.to_csv(index=False, encoding="utf-8-sig"), "family_asset_records.csv", "text/csv")
-        st.download_button("下載 Excel", to_excel_bytes(export_df), "family_asset_records.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.subheader("匯入 CSV")
-    up = st.file_uploader("上傳 CSV，欄位需包含：日期、萱、憲、傑、文", type=["csv"])
-    if up is not None:
-        try:
-            newdf = pd.read_csv(up)
-            missing = [c for c in COLUMNS if c not in newdf.columns]
-            if missing:
-                st.error("缺少欄位：" + "、".join(missing))
+    st.header("設定")
+    usd_twd = st.number_input("USD/TWD 匯率", value=float(fetch_usd_twd()), step=0.01)
+    if st.button("🔄 更新全部市價", use_container_width=True):
+        progress = st.progress(0)
+        updates = []
+        status = st.empty()
+        for i, row in df.iterrows():
+            p = fetch_price(row)
+            if p:
+                df.loc[i,"price"] = p
+                df.loc[i,"last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                updates.append(f"✅ {row['symbol']} → {p:.2f}")
             else:
-                newdf = newdf[COLUMNS]
-                newdf["日期"] = pd.to_datetime(newdf["日期"], errors="coerce").dt.date
-                newdf = newdf.dropna(subset=["日期"])
-                for p in PEOPLE:
-                    newdf[p] = pd.to_numeric(newdf[p], errors="coerce").fillna(0).astype(int)
-                if st.button("確認匯入並覆蓋目前資料"):
-                    save_data(newdf)
-                    st.success("匯入完成。")
-                    st.rerun()
-        except Exception as e:
-            st.error(f"匯入失敗：{e}")
+                updates.append(f"⚠️ {row['symbol']} 保留 {row['price']}")
+            progress.progress((i+1)/len(df))
+        save_holdings(df)
+        status.write("\n".join(updates))
+        st.success("市價更新完成")
+        st.rerun()
 
-else:
-    st.subheader("手機使用方式")
-    st.markdown("""
-1. 把整個專案上傳到 GitHub。
-2. 到 Streamlit Cloud 建立 App，Main file 選 `app.py`。
-3. 產生網址後，用手機 Safari / Chrome 打開。
-4. iPhone：分享 → 加入主畫面。Android：選單 → 加到主畫面。
+st.title("💼 投資總控 Pro v3｜個人資產管理系統")
+st.caption("總資產・已實現/未實現損益・手續費・現金部位・股息・月年統計・價差戶績效")
 
-注意：免費 Streamlit Cloud 的本機 CSV 可能因重新部署而重置，建議定期使用「匯出 Excel / CSV」備份。
-""")
+dfv = calc_values(df, usd_twd)
+gross_realized,total_fee,total_tax,net_realized,cash_flow = realized_summary(logs)
+gross_dividend,dividend_tax,net_dividend = dividend_summary(divs)
+total_asset = dfv["台幣市值"].sum()
+total_cost = dfv["台幣成本"].sum()
+unrealized_profit = dfv["未實現損益"].sum()
+cash_total = dfv.loc[dfv["purpose"].eq("現金"), "台幣市值"].sum()
+total_profit = unrealized_profit + net_realized + net_dividend
+
+c1,c2,c3,c4 = st.columns(4)
+c1.metric("目前總資產", f"{money(total_asset)} 元")
+c2.metric("未實現損益", f"{money(unrealized_profit)} 元")
+c3.metric("已實現損益淨額", f"{money(net_realized)} 元")
+c4.metric("現金部位", f"{money(cash_total)} 元")
+
+c5,c6,c7,c8 = st.columns(4)
+c5.metric("總成本", f"{money(total_cost)} 元")
+c6.metric("股息淨收入", f"{money(net_dividend)} 元")
+c7.metric("累計手續費/稅", f"{money(total_fee + dividend_tax)} 元")
+c8.metric("總損益估算", f"{money(total_profit)} 元")
+
+if st.button("📌 儲存今日資產紀錄", use_container_width=True):
+    save_daily_asset(total_asset,total_cost,total_profit,net_realized,unrealized_profit,total_fee,net_dividend,cash_total)
+    st.success("已儲存今日資產紀錄")
+
+backup = {
+    "holdings": df.to_dict(orient="records"),
+    "trade_logs": logs.to_dict(orient="records"),
+    "dividends": divs.to_dict(orient="records"),
+    "daily_assets": load_table("daily_assets","record_date DESC").to_dict(orient="records"),
+    "family_assets": load_family_assets().to_dict(orient="records"),
+}
+st.download_button("⬇️ 匯出完整備份 JSON", data=pd.Series(backup).to_json(force_ascii=False, indent=2),
+                   file_name="投資總控Pro_v3備份.json", mime="application/json", use_container_width=True)
+
+tabs = st.tabs(["總覽","持股管理","00631L操作","交易/已實現","股息收入","每日資產","損益分析","資產配置","家庭資產"])
+
+with tabs[0]:
+    st.subheader("各帳戶金額")
+    acct = dfv.groupby("account")[["台幣市值","台幣成本","未實現損益"]].sum().reset_index()
+    acct["報酬率"] = acct["未實現損益"] / acct["台幣成本"].replace(0,pd.NA) * 100
+    st.dataframe(acct, use_container_width=True, hide_index=True)
+    st.subheader("用途分類")
+    purpose = dfv.groupby("purpose")[["台幣市值","台幣成本","未實現損益"]].sum().reset_index()
+    purpose["報酬率"] = purpose["未實現損益"] / purpose["台幣成本"].replace(0,pd.NA) * 100
+    st.dataframe(purpose, use_container_width=True, hide_index=True)
+
+with tabs[1]:
+    st.subheader("持股總表")
+    show_cols = ["id","account","purpose","market","currency","symbol","name","shares","cost","price","台幣市值","台幣成本","未實現損益","報酬率","last_update"]
+    edited = st.data_editor(dfv[show_cols], use_container_width=True, num_rows="dynamic", hide_index=True)
+    if st.button("💾 儲存持股修改"):
+        save_cols = ["id","account","purpose","market","currency","symbol","name","shares","cost","price","last_update"]
+        save_holdings(edited[save_cols])
+        st.success("已儲存")
+        st.rerun()
+
+with tabs[2]:
+    st.subheader("00631L 分批獲利計畫")
+    target = df[df["symbol"].str.upper()=="00631L"]
+    if target.empty:
+        st.warning("找不到00631L")
+    else:
+        h = target.iloc[0]
+        a,b,c,d = st.columns(4)
+        sell1 = a.number_input("第一批賣出價", value=39.0, step=0.1)
+        sell2 = b.number_input("第二批賣出價", value=44.0, step=0.1)
+        sell3 = c.number_input("第三批賣出價", value=50.0, step=0.1)
+        sell_ratio = d.number_input("每批賣出比例%", value=20.0, step=1.0)/100
+        sell_shares = int(h["shares"] * sell_ratio)
+        remain = h["shares"]
+        rows, alloc = [], []
+        for n, sp in enumerate([sell1,sell2,sell3],1):
+            amount = sell_shares * sp
+            profit = sell_shares * (sp - h["cost"])
+            remain -= sell_shares
+            rows.append({"批次":f"第{n}批","目標價":sp,"賣出股數":sell_shares,"賣出金額":amount,"預估毛獲利":profit,"剩餘股數":remain,"狀態":"已達標" if h["price"]>=sp else "未達標"})
+            alloc.append({"批次":f"第{n}批","毛獲利":profit,"QQQ 30%":profit*.3,"SMH 20%":profit*.2,"保留現金 30%":profit*.3,"價差戶 20%":profit*.2})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.subheader("獲利分配")
+        st.dataframe(pd.DataFrame(alloc), use_container_width=True, hide_index=True)
+        nxt = [r for r in rows if r["狀態"]=="未達標"]
+        if nxt:
+            st.info(f"下一步：00631L 到 {nxt[0]['目標價']} 元，賣出 {nxt[0]['賣出股數']} 股。")
+        else:
+            st.success("三批目標都已達標。")
+        high = st.number_input("最近高點/下跌加碼參考價", value=50.0, step=0.1)
+        st.dataframe(pd.DataFrame([
+            {"跌幅":"-10%","參考價":high*.9,"動作":"投入保留現金30%"},
+            {"跌幅":"-15%","參考價":high*.85,"動作":"再投入保留現金30%"},
+            {"跌幅":"-20%","參考價":high*.8,"動作":"投入剩餘保留現金40%"},
+        ]), use_container_width=True, hide_index=True)
+
+with tabs[3]:
+    st.subheader("新增交易紀錄 / 已實現損益")
+    with st.form("trade_form"):
+        c1,c2,c3 = st.columns(3)
+        ldate = c1.date_input("日期", value=date.today())
+        laccount = c2.selectbox("帳戶", sorted(df["account"].unique()))
+        lsymbol = c3.text_input("標的", value="00631L")
+        c4,c5,c6 = st.columns(3)
+        action = c4.selectbox("動作", ["買進","賣出","加碼","停利","停損","轉入長期帳戶","轉入價差帳戶","現金轉入","現金轉出"])
+        qty = c5.number_input("股數/數量", value=0.0, step=1.0)
+        trade_price = c6.number_input("成交價", value=0.0, step=0.01)
+        c7,c8,c9,c10 = st.columns(4)
+        buy_fee = c7.number_input("買進手續費", value=0.0, step=1.0)
+        sell_fee = c8.number_input("賣出手續費", value=0.0, step=1.0)
+        tax = c9.number_input("證交稅/交易稅", value=0.0, step=1.0)
+        realized_profit = c10.number_input("已實現毛損益", value=0.0, step=1.0)
+        cash_flow = st.number_input("現金流入/流出（流入正數、流出負數）", value=0.0, step=1.0)
+        note = st.text_area("內容")
+        submitted = st.form_submit_button("新增交易")
+        if submitted:
+            add_log(ldate.isoformat(),laccount,lsymbol,action,note,qty,trade_price,buy_fee,sell_fee,tax,realized_profit,cash_flow)
+            st.success("已新增")
+            st.rerun()
+    logs_show = load_table("trade_logs","log_date DESC,id DESC")
+    if not logs_show.empty:
+        logs_show["淨已實現損益"] = logs_show["realized_profit"].fillna(0)-logs_show["buy_fee"].fillna(0)-logs_show["sell_fee"].fillna(0)-logs_show["tax"].fillna(0)
+        kw = st.text_input("搜尋交易紀錄（代碼/備註/帳戶）")
+        if kw:
+            mask = logs_show.astype(str).apply(lambda col: col.str.contains(kw, case=False, na=False)).any(axis=1)
+            logs_show = logs_show[mask]
+    st.dataframe(logs_show, use_container_width=True, hide_index=True)
+
+with tabs[4]:
+    st.subheader("新增股息收入")
+    with st.form("div_form"):
+        c1,c2,c3 = st.columns(3)
+        pdate = c1.date_input("入帳日", value=date.today())
+        acc = c2.selectbox("帳戶", sorted(df["account"].unique()), key="divacc")
+        sym = c3.text_input("標的", value="2330")
+        c4,c5 = st.columns(2)
+        amount = c4.number_input("股息金額", value=0.0, step=1.0)
+        tax = c5.number_input("扣稅/匯費", value=0.0, step=1.0)
+        note = st.text_area("備註", key="divnote")
+        if st.form_submit_button("新增股息"):
+            add_dividend(pdate.isoformat(),acc,sym,amount,tax,note)
+            st.success("已新增股息")
+            st.rerun()
+    divs_show = load_table("dividends","pay_date DESC,id DESC")
+    if not divs_show.empty:
+        divs_show["股息淨額"] = divs_show["amount"].fillna(0)-divs_show["tax"].fillna(0)
+    st.dataframe(divs_show, use_container_width=True, hide_index=True)
+
+with tabs[5]:
+    st.subheader("每日資產變化")
+    daily = load_table("daily_assets","record_date DESC")
+    if not daily.empty:
+        daily["較前次變化"] = daily["total_asset"].diff(-1)
+        st.dataframe(daily, use_container_width=True, hide_index=True)
+        chart_df = daily.sort_values("record_date")
+        st.line_chart(chart_df.set_index("record_date")[["total_asset","unrealized_profit","realized_profit"]])
+    else:
+        st.info("尚未有每日資產紀錄。")
+
+with tabs[6]:
+    st.subheader("損益分析")
+    logs2 = load_table("trade_logs","log_date DESC,id DESC")
+    if not logs2.empty:
+        logs2["淨已實現損益"] = logs2["realized_profit"].fillna(0)-logs2["buy_fee"].fillna(0)-logs2["sell_fee"].fillna(0)-logs2["tax"].fillna(0)
+        logs2["月份"] = pd.to_datetime(logs2["log_date"]).dt.to_period("M").astype(str)
+        logs2["年度"] = pd.to_datetime(logs2["log_date"]).dt.year.astype(str)
+        st.write("依標的")
+        st.dataframe(logs2.groupby("symbol")[["realized_profit","buy_fee","sell_fee","tax","淨已實現損益"]].sum().reset_index(), use_container_width=True, hide_index=True)
+        st.write("依帳戶")
+        st.dataframe(logs2.groupby("account")[["realized_profit","buy_fee","sell_fee","tax","淨已實現損益"]].sum().reset_index(), use_container_width=True, hide_index=True)
+        st.write("依月份")
+        st.dataframe(logs2.groupby("月份")[["realized_profit","buy_fee","sell_fee","tax","淨已實現損益"]].sum().reset_index(), use_container_width=True, hide_index=True)
+        st.write("依年度")
+        st.dataframe(logs2.groupby("年度")[["realized_profit","buy_fee","sell_fee","tax","淨已實現損益"]].sum().reset_index(), use_container_width=True, hide_index=True)
+    else:
+        st.info("尚未有交易紀錄。")
+
+with tabs[7]:
+    st.subheader("資產配置")
+    st.write("依帳戶")
+    acct_chart = dfv.groupby("account")["台幣市值"].sum()
+    st.bar_chart(acct_chart)
+    st.write("依用途")
+    purpose_chart = dfv.groupby("purpose")["台幣市值"].sum()
+    st.bar_chart(purpose_chart)
+    st.write("前十大持股")
+    top = dfv[dfv["purpose"]!="現金"].sort_values("台幣市值", ascending=False).head(10)
+    st.dataframe(top[["symbol","name","account","purpose","台幣市值","未實現損益","報酬率"]], use_container_width=True, hide_index=True)
+
+
+with tabs[8]:
+    st.subheader("家庭資產紀錄")
+    st.caption("已匯入 family_asset_records.csv，可新增每日紀錄並查看每位成員與家庭總資產變化。")
+
+    fam = load_family_assets()
+
+    with st.form("family_asset_form"):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        fdate = c1.date_input("日期", value=date.today(), key="family_date")
+        xuan = c2.number_input("萱", value=0.0, step=1000.0)
+        xian = c3.number_input("憲", value=0.0, step=1000.0)
+        jie = c4.number_input("傑", value=0.0, step=1000.0)
+        wen = c5.number_input("文", value=0.0, step=1000.0)
+        if st.form_submit_button("新增 / 更新家庭資產紀錄"):
+            upsert_family_asset(fdate.isoformat(), xuan, xian, jie, wen)
+            st.success("已新增 / 更新家庭資產紀錄")
+            st.rerun()
+
+    fam = load_family_assets()
+    if not fam.empty:
+        show = fam.copy()
+        show = show.rename(columns={
+            "record_date": "日期",
+            "xuan": "萱",
+            "xian": "憲",
+            "jie": "傑",
+            "wen": "文",
+            "total": "家庭總資產"
+        })
+        show["較前次變化"] = show["家庭總資產"].diff(-1)
+        st.dataframe(show[["日期","萱","憲","傑","文","家庭總資產","較前次變化"]], use_container_width=True, hide_index=True)
+
+        chart = show.sort_values("日期").set_index("日期")[["萱","憲","傑","文","家庭總資產"]]
+        st.line_chart(chart)
+
+        latest = show.sort_values("日期").iloc[-1]
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("萱", f"{latest['萱']:,.0f} 元")
+        c2.metric("憲", f"{latest['憲']:,.0f} 元")
+        c3.metric("傑", f"{latest['傑']:,.0f} 元")
+        c4.metric("文", f"{latest['文']:,.0f} 元")
+        c5.metric("家庭總資產", f"{latest['家庭總資產']:,.0f} 元")
+
+        csv = show.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ 匯出家庭資產紀錄 CSV", data=csv, file_name="家庭資產紀錄.csv", mime="text/csv", use_container_width=True)
+    else:
+        st.info("尚未有家庭資產紀錄。")
