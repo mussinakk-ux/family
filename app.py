@@ -194,6 +194,50 @@ def upsert_family_asset(record_date, xuan, xian, jie, wen):
     conn.commit()
     conn.close()
 
+def import_family_csv(force_replace=False):
+    csv_path = Path("family_asset_records.csv")
+    if not csv_path.exists():
+        return False, "找不到 family_asset_records.csv"
+    last_error = None
+    fam = None
+    for enc in ["utf-8-sig", "utf-8", "big5", "cp950"]:
+        try:
+            fam = pd.read_csv(csv_path, encoding=enc)
+            break
+        except Exception as e:
+            last_error = e
+    if fam is None:
+        return False, f"CSV 讀取失敗：{last_error}"
+    fam = fam.loc[:, ~fam.columns.astype(str).str.startswith("Unnamed")]
+    required = ["日期", "萱", "憲", "傑", "文"]
+    missing = [c for c in required if c not in fam.columns]
+    if missing:
+        return False, f"CSV 欄位缺少：{missing}"
+    fam = fam.dropna(subset=["日期"])
+    for col in ["萱", "憲", "傑", "文"]:
+        fam[col] = pd.to_numeric(fam[col], errors="coerce").fillna(0)
+    conn = connect()
+    cur = conn.cursor()
+    if force_replace:
+        cur.execute("DELETE FROM family_assets")
+    count = 0
+    for _, r in fam.iterrows():
+        total = float(r["萱"]) + float(r["憲"]) + float(r["傑"]) + float(r["文"])
+        cur.execute("""
+        INSERT INTO family_assets (record_date,xuan,xian,jie,wen,total)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(record_date) DO UPDATE SET
+          xuan=excluded.xuan,
+          xian=excluded.xian,
+          jie=excluded.jie,
+          wen=excluded.wen,
+          total=excluded.total
+        """, (str(r["日期"]), float(r["萱"]), float(r["憲"]), float(r["傑"]), float(r["文"]), total))
+        count += 1
+    conn.commit()
+    conn.close()
+    return True, f"已匯入 {count} 筆家庭資產紀錄"
+
 def load_holdings():
     conn = connect()
     df = pd.read_sql_query("SELECT * FROM holdings", conn)
@@ -337,7 +381,7 @@ with st.sidebar:
         st.success("市價更新完成")
         st.rerun()
 
-st.title("💼 投資總控 Pro v3｜個人資產管理系統")
+st.title("💼 投資總控 Pro v3.1｜已匯入家庭資產")
 st.caption("總資產・已實現/未實現損益・手續費・現金部位・股息・月年統計・價差戶績效")
 
 dfv = calc_values(df, usd_twd)
@@ -532,6 +576,18 @@ with tabs[8]:
     st.caption("已匯入 family_asset_records.csv，可新增每日紀錄並查看每位成員與家庭總資產變化。")
 
     fam = load_family_assets()
+
+    col_import1, col_import2 = st.columns(2)
+    with col_import1:
+        if st.button("重新匯入 family_asset_records.csv（覆蓋家庭資產紀錄）", use_container_width=True):
+            ok, msg = import_family_csv(force_replace=True)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+    with col_import2:
+        st.caption("若舊資料沒有更新，請按左邊按鈕重新匯入。")
 
     with st.form("family_asset_form"):
         c1, c2, c3, c4, c5 = st.columns(5)
