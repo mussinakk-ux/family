@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_TITLE = "家庭資產管理系統 v2.2"
+APP_TITLE = "家庭資產管理系統 v2.3"
 PEOPLE = ["萱", "憲", "傑", "文"]
 PERSON_COLORS = {"萱": "#FFD700", "憲": "#00C853", "傑": "#42A5F5", "文": "#BA68C8"}
 TOTAL_COLOR = "#FFD700"
@@ -106,6 +106,24 @@ def current_period_gain(edf: pd.DataFrame, period: str) -> int:
         return 0
     return int(sub.iloc[-1]["總資產"] - sub.iloc[0]["總資產"])
 
+
+
+def all_history_gain(edf: pd.DataFrame) -> int:
+    """從第一筆紀錄開始，累計所有「與前一天相比」的增減。
+    第一筆沒有前一天，視為 0；結果等同於最新總資產 - 第一筆總資產。
+    """
+    if edf.empty or len(edf) <= 1:
+        return 0
+    return int(pd.to_numeric(edf["每日增減"], errors="coerce").fillna(0).sum())
+
+
+def annual_total_changes(edf: pd.DataFrame) -> pd.DataFrame:
+    """每年度總資產增減表。"""
+    if edf.empty:
+        return pd.DataFrame(columns=["年度", "年初總資產", "年末總資產", "年增減"])
+    year = edf.groupby("年度").agg(年初總資產=("總資產", "first"), 年末總資產=("總資產", "last"))
+    year["年增減"] = year["年末總資產"] - year["年初總資產"]
+    return year.reset_index()
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = BytesIO()
@@ -304,11 +322,15 @@ if page == "首頁總覽":
         today_gain = int(latest["每日增減"])
         month_gain = current_period_gain(edf, "month")
         year_gain = current_period_gain(edf, "year")
-        c1, c2, c3, c4 = st.columns(4)
+        history_gain = all_history_gain(edf)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("目前總資產", money(latest["總資產"]))
         c2.metric("較前一筆", signed(today_gain))
         c3.metric("本月增減", signed(month_gain))
         c4.metric("本年增減", signed(year_gain))
+        c5.metric("歷年累計增減", signed(history_gain))
+
+        st.caption("歷年累計增減＝從第一筆紀錄開始，逐日累計『與前一天相比』的總變化；第一筆沒有前一天，因此從 0 開始計算。")
 
         st.markdown("### 四人資產與每日變化歷史統計")
         cols = st.columns(4)
@@ -321,6 +343,14 @@ if page == "首頁總覽":
         fig.update_traces(line=dict(color=TOTAL_COLOR, width=3), marker=dict(size=7, color=TOTAL_COLOR))
         fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("### 總資產歷年增減")
+        year_summary = annual_total_changes(edf)
+        if not year_summary.empty:
+            fig_year = px.bar(year_summary, x="年度", y="年增減", text="年增減", labels={"年增減":"年度增減"})
+            fig_year.update_traces(marker_color=TOTAL_COLOR, texttemplate="%{text:,}", textposition="outside")
+            fig_year.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
+            st.plotly_chart(fig_year, use_container_width=True)
 
         st.markdown("### 個人資產走勢")
         long = edf.melt(id_vars=["日期_dt"], value_vars=PEOPLE, var_name="姓名", value_name="資產")
@@ -375,9 +405,14 @@ elif page == "歷史紀錄":
         month["月增減"] = month["月末總資產"] - month["月初總資產"]
         st.dataframe(month.reset_index().sort_values("月份", ascending=False), use_container_width=True, hide_index=True)
         st.markdown("### 年報表")
-        year = edf.groupby("年度").agg(年初總資產=("總資產", "first"), 年末總資產=("總資產", "last"))
-        year["年增減"] = year["年末總資產"] - year["年初總資產"]
-        st.dataframe(year.reset_index().sort_values("年度", ascending=False), use_container_width=True, hide_index=True)
+        year = annual_total_changes(edf)
+        st.dataframe(year.sort_values("年度", ascending=False), use_container_width=True, hide_index=True)
+
+        st.markdown("### 從第一筆紀錄開始的每日增減累計")
+        cumulative = edf[["日期", "總資產", "每日增減"]].copy()
+        cumulative["累計每日增減"] = cumulative["每日增減"].cumsum()
+        cumulative["日期"] = pd.to_datetime(cumulative["日期"]).dt.strftime("%Y-%m-%d")
+        st.dataframe(cumulative.sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
 
 elif page == "月曆":
     st.subheader("月曆顯示")
