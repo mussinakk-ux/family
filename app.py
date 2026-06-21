@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_TITLE = "家庭資產管理系統 v2.3"
+APP_TITLE = "家庭資產管理系統 v2.4"
 PEOPLE = ["萱", "憲", "傑", "文"]
 PERSON_COLORS = {"萱": "#FFD700", "憲": "#00C853", "傑": "#42A5F5", "文": "#BA68C8"}
 TOTAL_COLOR = "#FFD700"
@@ -20,7 +20,7 @@ st.set_page_config(
     page_title=APP_TITLE,
     page_icon="💰",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 THEMES = {
@@ -115,6 +115,14 @@ def all_history_gain(edf: pd.DataFrame) -> int:
     if edf.empty or len(edf) <= 1:
         return 0
     return int(pd.to_numeric(edf["每日增減"], errors="coerce").fillna(0).sum())
+
+
+def person_history_gain(edf: pd.DataFrame, person: str) -> int:
+    """每個人從第一筆紀錄開始，逐日累計與前一天相比的總變化。"""
+    col = f"{person}增減"
+    if edf.empty or len(edf) <= 1 or col not in edf.columns:
+        return 0
+    return int(pd.to_numeric(edf[col], errors="coerce").fillna(0).sum())
 
 
 def annual_total_changes(edf: pd.DataFrame) -> pd.DataFrame:
@@ -222,7 +230,7 @@ def person_daily_stats(edf: pd.DataFrame, person: str) -> dict[str, int | float]
     """回傳每個人每日變化的歷史統計。"""
     col = f"{person}增減"
     if edf.empty or col not in edf.columns:
-        return {"today": 0, "avg": 0, "max_up": 0, "max_down": 0, "positive_days": 0, "total_days": 0}
+        return {"today": 0, "history_gain": 0, "avg": 0, "max_up": 0, "max_down": 0, "positive_days": 0, "total_days": 0}
     changes = pd.to_numeric(edf[col], errors="coerce").fillna(0)
     # 第一筆通常是 0，統計時排除第一筆，較接近真正每日變化
     if len(changes) > 1:
@@ -231,6 +239,7 @@ def person_daily_stats(edf: pd.DataFrame, person: str) -> dict[str, int | float]
         history = changes
     return {
         "today": int(changes.iloc[-1]) if len(changes) else 0,
+        "history_gain": person_history_gain(edf, person),
         "avg": float(history.mean()) if len(history) else 0,
         "max_up": int(history.max()) if len(history) else 0,
         "max_down": int(history.min()) if len(history) else 0,
@@ -241,6 +250,7 @@ def person_daily_stats(edf: pd.DataFrame, person: str) -> dict[str, int | float]
 
 def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
     today = int(stats.get("today", 0))
+    history_gain = int(stats.get("history_gain", 0))
     avg = int(round(float(stats.get("avg", 0))))
     max_up = int(stats.get("max_up", 0))
     max_down = int(stats.get("max_down", 0))
@@ -253,6 +263,7 @@ def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
         <div class="asset-value">{value}</div>
         <div class="{today_cls}">今日變化 {signed(today)}</div>
         <div class="asset-small" style="font-size:14px; line-height:1.65; margin-top:8px;">
+            歷年累計增減：{signed(history_gain)}<br>
             平均日變化：{signed(avg)}<br>
             最大增加：{signed(max_up)}<br>
             最大減少：{signed(max_down)}<br>
@@ -296,16 +307,13 @@ def render_calendar(edf: pd.DataFrame) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
-# Sidebar / state
+# State / top navigation
 if "theme" not in st.session_state:
     st.session_state.theme = "黑金尊爵版"
+if "page" not in st.session_state:
+    st.session_state.page = "首頁總覽"
 
-theme_name = st.sidebar.radio("介面配色", list(THEMES.keys()), index=list(THEMES.keys()).index(st.session_state.theme))
-st.session_state.theme = theme_name
-inject_css(theme_name)
-
-st.sidebar.markdown("### 功能")
-page = st.sidebar.radio("選單", ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "使用說明"])
+inject_css(st.session_state.theme)
 
 # Load fresh each rerun
 raw_df = load_data()
@@ -313,6 +321,25 @@ edf = enrich(raw_df)
 
 st.title(f"💰 {APP_TITLE}")
 st.caption("單純記錄四人資產數值：萱、憲、傑、文。可新增、修改、刪除、匯出與匯入。")
+
+nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "使用說明"]
+st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
+nav_cols = st.columns(len(nav_pages))
+for i, nav in enumerate(nav_pages):
+    with nav_cols[i]:
+        label = ("✅ " if st.session_state.page == nav else "") + nav
+        if st.button(label, key=f"nav_{nav}", use_container_width=True):
+            st.session_state.page = nav
+            st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
+
+with st.expander("🎨 介面配色", expanded=False):
+    theme_choice = st.radio("選擇配色", list(THEMES.keys()), index=list(THEMES.keys()).index(st.session_state.theme), horizontal=True)
+    if theme_choice != st.session_state.theme:
+        st.session_state.theme = theme_choice
+        st.rerun()
+
+page = st.session_state.page
 
 if page == "首頁總覽":
     if edf.empty:
@@ -357,6 +384,14 @@ if page == "首頁總覽":
         fig2 = px.line(long, x="日期_dt", y="資產", color="姓名", markers=True, labels={"日期_dt":"日期"}, color_discrete_map=PERSON_COLORS)
         fig2.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
         st.plotly_chart(fig2, use_container_width=True)
+
+        st.markdown("### 個人歷年累計增減")
+        person_history = pd.DataFrame([{"姓名": p, "歷年累計增減": person_history_gain(edf, p)} for p in PEOPLE])
+        fig3 = px.bar(person_history, x="姓名", y="歷年累計增減", text="歷年累計增減", color="姓名", color_discrete_map=PERSON_COLORS)
+        fig3.update_traces(texttemplate="%{text:,}", textposition="outside")
+        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark", showlegend=False)
+        st.plotly_chart(fig3, use_container_width=True)
+        st.dataframe(person_history, use_container_width=True, hide_index=True)
 
 elif page == "新增／修改":
     st.subheader("新增或修改每日紀錄")
@@ -409,8 +444,10 @@ elif page == "歷史紀錄":
         st.dataframe(year.sort_values("年度", ascending=False), use_container_width=True, hide_index=True)
 
         st.markdown("### 從第一筆紀錄開始的每日增減累計")
-        cumulative = edf[["日期", "總資產", "每日增減"]].copy()
-        cumulative["累計每日增減"] = cumulative["每日增減"].cumsum()
+        cumulative = edf[["日期", "總資產", "每日增減", *[f"{p}增減" for p in PEOPLE]]].copy()
+        cumulative["總資產累計增減"] = cumulative["每日增減"].cumsum()
+        for p in PEOPLE:
+            cumulative[f"{p}累計增減"] = cumulative[f"{p}增減"].cumsum()
         cumulative["日期"] = pd.to_datetime(cumulative["日期"]).dt.strftime("%Y-%m-%d")
         st.dataframe(cumulative.sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
 
