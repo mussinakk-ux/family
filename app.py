@@ -4,12 +4,36 @@ from datetime import date
 from io import BytesIO
 from pathlib import Path
 import calendar
+import json
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_TITLE = "$億萬富翁家庭資產"
+DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
+DEFAULT_APP_ICON = "💰"
+CONFIG_FILE = Path("config.json")
+
+
+def load_config() -> dict:
+    default = {"app_name": DEFAULT_APP_TITLE, "app_icon": DEFAULT_APP_ICON, "theme": "黑金尊爵版"}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                default.update({k: v for k, v in data.items() if v is not None})
+        except Exception:
+            pass
+    return default
+
+
+def save_config(config: dict) -> None:
+    CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+APP_CONFIG = load_config()
+APP_TITLE = str(APP_CONFIG.get("app_name") or DEFAULT_APP_TITLE)
+APP_ICON = str(APP_CONFIG.get("app_icon") or DEFAULT_APP_ICON)
 PEOPLE = ["憲", "萱", "傑", "文"]
 PERSON_COLORS = {"憲": "#00C853", "萱": "#FFD700", "傑": "#42A5F5", "文": "#BA68C8"}
 TOTAL_COLOR = "#FFD700"
@@ -18,7 +42,7 @@ DATA_FILE = Path("data.csv")
 
 st.set_page_config(
     page_title=APP_TITLE,
-    page_icon="💰",
+    page_icon=APP_ICON,
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -309,7 +333,7 @@ def render_calendar(edf: pd.DataFrame) -> None:
 
 # State / top navigation
 if "theme" not in st.session_state:
-    st.session_state.theme = "黑金尊爵版"
+    st.session_state.theme = APP_CONFIG.get("theme", "黑金尊爵版") if APP_CONFIG.get("theme") in THEMES else "黑金尊爵版"
 if "page" not in st.session_state:
     st.session_state.page = "首頁總覽"
 
@@ -319,8 +343,8 @@ inject_css(st.session_state.theme)
 raw_df = load_data()
 edf = enrich(raw_df)
 
-st.title(f"💰 {APP_TITLE}")
-nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "使用說明"]
+st.title(f"{APP_ICON} {APP_TITLE}")
+nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "設定", "使用說明"]
 st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
 nav_cols = st.columns(len(nav_pages))
 for i, nav in enumerate(nav_pages):
@@ -335,6 +359,9 @@ with st.expander("🎨 介面配色", expanded=False):
     theme_choice = st.radio("選擇配色", list(THEMES.keys()), index=list(THEMES.keys()).index(st.session_state.theme), horizontal=True)
     if theme_choice != st.session_state.theme:
         st.session_state.theme = theme_choice
+        cfg = load_config()
+        cfg["theme"] = theme_choice
+        save_config(cfg)
         st.rerun()
 
 page = st.session_state.page
@@ -497,6 +524,25 @@ elif page == "匯入／匯出":
                     save_data(imported)
                     st.success("匯入完成。")
                     st.rerun()
+
+elif page == "設定":
+    st.subheader("APP 名稱設定")
+    st.caption("可以自己命名首頁標題，也可以更換前方 Emoji。儲存後會同步到瀏覽器標題，手機加入主畫面時也會用新的名稱。")
+    cfg = load_config()
+    with st.form("app_config_form"):
+        new_icon = st.text_input("APP 圖示 Emoji", value=str(cfg.get("app_icon", DEFAULT_APP_ICON)), max_chars=4)
+        new_name = st.text_input("APP 名稱", value=str(cfg.get("app_name", DEFAULT_APP_TITLE)))
+        save_btn = st.form_submit_button("儲存 APP 名稱")
+        if save_btn:
+            cfg["app_icon"] = new_icon.strip() or DEFAULT_APP_ICON
+            cfg["app_name"] = new_name.strip() or DEFAULT_APP_TITLE
+            cfg["theme"] = st.session_state.theme
+            save_config(cfg)
+            st.success("已儲存 APP 名稱。頁面即將重新整理。")
+            st.rerun()
+
+    st.markdown("### 預覽")
+    card("目前 APP 標題", f"{str(cfg.get('app_icon', DEFAULT_APP_ICON))} {str(cfg.get('app_name', DEFAULT_APP_TITLE))}")
 
 else:
     st.subheader("使用說明")
