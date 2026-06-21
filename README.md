@@ -1,15 +1,49 @@
-# 投資總控 Pro v3.1 已匯入家庭資產紀錄
+# 家庭資產管理系統 v2.1
 
-已修正版：
-- 內含正確 family_asset_records.csv
-- 新增「家庭資產」頁籤
-- 可重新匯入 CSV 並覆蓋舊家庭資產紀錄
-- 保留 v3 的已實現/未實現損益、手續費、股息、每日資產、00631L 操作中心
+單純記錄四人資產數值：萱、憲、傑、文。
 
-上傳 GitHub 覆蓋：
-- app.py
-- requirements.txt
-- .streamlit/config.toml
-- family_asset_records.csv
+## v2.1 功能
 
-Streamlit 更新後，如果家庭資產仍沒變，進入「家庭資產」頁籤，按「重新匯入 family_asset_records.csv」。
+- 新增 / 修改 / 刪除每日資產紀錄
+- 同日期自動覆蓋
+- 自動計算：總資產、較前一筆、本月增減、本年增減
+- 四人個別資產卡片
+- 總資產走勢圖
+- 四人個別資產走勢圖
+- 歷史紀錄表
+- 月報表、年報表
+- 月曆模式
+- 黑金尊爵版 / 招財綠金版切換
+- CSV 匯入 / 匯出
+- Excel 匯出
+- 手機與電腦皆可使用
+
+## GitHub 上傳方式
+
+1. 建立新的 GitHub Repository
+2. 將整個資料夾內的檔案上傳
+3. 確認有以下檔案：
+   - `app.py`
+   - `requirements.txt`
+   - `data.csv`
+   - `.streamlit/config.toml`
+   - `README.md`
+
+## Streamlit Cloud 部署方式
+
+1. 到 Streamlit Cloud 建立 New app
+2. 選擇你的 GitHub Repository
+3. Main file path 填：`app.py`
+4. Deploy
+
+## 手機加入桌面
+
+### iPhone
+Safari 打開 Streamlit 網址 → 分享 → 加入主畫面
+
+### Android
+Chrome 打開 Streamlit 網址 → 右上角選單 → 加到主畫面
+
+## 注意
+
+Streamlit Cloud 免費版的本機 `data.csv` 可能在重新部署或休眠後重置。請定期使用匯出 CSV / Excel 備份。
