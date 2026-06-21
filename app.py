@@ -9,8 +9,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_TITLE = "家庭資產管理系統 v2.1"
+APP_TITLE = "家庭資產管理系統 v2.2"
 PEOPLE = ["萱", "憲", "傑", "文"]
+PERSON_COLORS = {"萱": "#FFD700", "憲": "#00C853", "傑": "#42A5F5", "文": "#BA68C8"}
+TOTAL_COLOR = "#FFD700"
 COLUMNS = ["日期", *PEOPLE]
 DATA_FILE = Path("data.csv")
 
@@ -130,7 +132,11 @@ def inject_css(theme_name: str) -> None:
         background: radial-gradient(circle at top left, {t['accent2']} 0, {t['bg2']} 28%, {t['bg1']} 100%);
         color: {t['text']};
     }}
-    section[data-testid="stSidebar"] {{ background: rgba(0,0,0,.22); }}
+    section[data-testid="stSidebar"] {{ background: rgba(0,0,0,.30); }}
+    section[data-testid="stSidebar"], section[data-testid="stSidebar"] * {{ color: #FFFFFF !important; }}
+    section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] span {{ color: #FFFFFF !important; }}
+    section[data-testid="stSidebar"] [role="radiogroup"] label {{ color: #FFFFFF !important; }}
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] * {{ color: #FFFFFF !important; }}
     h1, h2, h3, label, .stMarkdown, .stText, .stCaption {{ color: {t['text']} !important; }}
     .asset-card {{
         padding: 18px 18px;
@@ -190,6 +196,50 @@ def card(label: str, value: str, sub: str = "", positive: bool | None = None) ->
         <div class="asset-label">{label}</div>
         <div class="asset-value">{value}</div>
         {f'<div class="{cls}">{sub}</div>' if sub else ''}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def person_daily_stats(edf: pd.DataFrame, person: str) -> dict[str, int | float]:
+    """回傳每個人每日變化的歷史統計。"""
+    col = f"{person}增減"
+    if edf.empty or col not in edf.columns:
+        return {"today": 0, "avg": 0, "max_up": 0, "max_down": 0, "positive_days": 0, "total_days": 0}
+    changes = pd.to_numeric(edf[col], errors="coerce").fillna(0)
+    # 第一筆通常是 0，統計時排除第一筆，較接近真正每日變化
+    if len(changes) > 1:
+        history = changes.iloc[1:]
+    else:
+        history = changes
+    return {
+        "today": int(changes.iloc[-1]) if len(changes) else 0,
+        "avg": float(history.mean()) if len(history) else 0,
+        "max_up": int(history.max()) if len(history) else 0,
+        "max_down": int(history.min()) if len(history) else 0,
+        "positive_days": int((history > 0).sum()) if len(history) else 0,
+        "total_days": int(len(history)),
+    }
+
+
+def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
+    today = int(stats.get("today", 0))
+    avg = int(round(float(stats.get("avg", 0))))
+    max_up = int(stats.get("max_up", 0))
+    max_down = int(stats.get("max_down", 0))
+    positive_days = int(stats.get("positive_days", 0))
+    total_days = int(stats.get("total_days", 0))
+    today_cls = "gain" if today >= 0 else "loss"
+    st.markdown(f"""
+    <div class="asset-card">
+        <div class="asset-label">{label}｜每日變化歷史統計</div>
+        <div class="asset-value">{value}</div>
+        <div class="{today_cls}">今日變化 {signed(today)}</div>
+        <div class="asset-small" style="font-size:14px; line-height:1.65; margin-top:8px;">
+            平均日變化：{signed(avg)}<br>
+            最大增加：{signed(max_up)}<br>
+            最大減少：{signed(max_down)}<br>
+            上升天數：{positive_days}/{total_days}
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -260,21 +310,21 @@ if page == "首頁總覽":
         c3.metric("本月增減", signed(month_gain))
         c4.metric("本年增減", signed(year_gain))
 
-        st.markdown("### 四人資產")
+        st.markdown("### 四人資產與每日變化歷史統計")
         cols = st.columns(4)
         for i, p in enumerate(PEOPLE):
-            gain = int(latest.get(f"{p}增減", 0))
             with cols[i]:
-                card(p, money(latest[p]), f"較前一筆 {signed(gain)}", gain >= 0)
+                person_card(p, money(latest[p]), person_daily_stats(edf, p))
 
         st.markdown("### 總資產走勢")
         fig = px.line(edf, x="日期_dt", y="總資產", markers=True, labels={"日期_dt":"日期", "總資產":"總資產"})
+        fig.update_traces(line=dict(color=TOTAL_COLOR, width=3), marker=dict(size=7, color=TOTAL_COLOR))
         fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### 個人資產走勢")
         long = edf.melt(id_vars=["日期_dt"], value_vars=PEOPLE, var_name="姓名", value_name="資產")
-        fig2 = px.line(long, x="日期_dt", y="資產", color="姓名", markers=True, labels={"日期_dt":"日期"})
+        fig2 = px.line(long, x="日期_dt", y="資產", color="姓名", markers=True, labels={"日期_dt":"日期"}, color_discrete_map=PERSON_COLORS)
         fig2.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
         st.plotly_chart(fig2, use_container_width=True)
 
