@@ -35,7 +35,7 @@ APP_CONFIG = load_config()
 APP_TITLE = str(APP_CONFIG.get("app_name") or DEFAULT_APP_TITLE)
 APP_ICON = str(APP_CONFIG.get("app_icon") or DEFAULT_APP_ICON)
 PEOPLE = ["憲", "萱", "傑", "文"]
-ASSET_TYPES = ["基金", "台股", "美股"]
+ASSET_TYPES = ["基金", "美股", "台股"]
 DETAIL_COLUMNS = [f"{p}{asset}" for p in PEOPLE for asset in ASSET_TYPES]
 PERSON_COLORS = {"憲": "#00C853", "萱": "#FFD700", "傑": "#42A5F5", "文": "#BA68C8"}
 TOTAL_COLOR = "#FFD700"
@@ -234,6 +234,20 @@ def inject_css(theme_name: str) -> None:
         color: #101010;
         font-weight: 800;
         min-height: 44px;
+    }}
+    div[data-testid="stFormSubmitButton"] button {{
+        border-radius: 18px !important;
+        border: 2px solid #FFFFFF !important;
+        background: linear-gradient(135deg, #00E676, #FFD700) !important;
+        color: #000000 !important;
+        font-size: 20px !important;
+        font-weight: 1000 !important;
+        min-height: 58px !important;
+        box-shadow: 0 0 24px rgba(255, 215, 0, .65), 0 0 18px rgba(0, 230, 118, .45) !important;
+    }}
+    div[data-testid="stFormSubmitButton"] button:hover {{
+        transform: translateY(-1px);
+        filter: brightness(1.08);
     }}
     .calendar-grid {{ display:grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }}
     .cal-head {{ text-align:center; color:{t['muted']}; font-weight:700; padding: 4px 0; }}
@@ -462,7 +476,7 @@ elif page == "新增／修改":
                 with cols[i]:
                     inputs[col] = st.number_input(f"{p}｜{asset}金額", min_value=0, step=1, value=defaults[col], format="%d", key=f"input_{col}")
             st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
-        submitted = st.form_submit_button("儲存這一天")
+        submitted = st.form_submit_button("💾 儲存這一天", type="primary", use_container_width=True)
         if submitted:
             new_df = upsert_record(raw_df, selected_date, {col: int(inputs[col]) for col in DETAIL_COLUMNS})
             save_data(new_df)
