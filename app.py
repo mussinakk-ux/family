@@ -35,9 +35,11 @@ APP_CONFIG = load_config()
 APP_TITLE = str(APP_CONFIG.get("app_name") or DEFAULT_APP_TITLE)
 APP_ICON = str(APP_CONFIG.get("app_icon") or DEFAULT_APP_ICON)
 PEOPLE = ["憲", "萱", "傑", "文"]
+ASSET_TYPES = ["基金", "台股", "美股"]
+DETAIL_COLUMNS = [f"{p}{asset}" for p in PEOPLE for asset in ASSET_TYPES]
 PERSON_COLORS = {"憲": "#00C853", "萱": "#FFD700", "傑": "#42A5F5", "文": "#BA68C8"}
 TOTAL_COLOR = "#FFD700"
-COLUMNS = ["日期", *PEOPLE]
+COLUMNS = ["日期", *DETAIL_COLUMNS]
 DATA_FILE = Path("data.csv")
 
 st.set_page_config(
@@ -77,25 +79,40 @@ def signed(v) -> str:
 
 
 def load_data() -> pd.DataFrame:
+    """讀取 data.csv。
+    舊版欄位「憲、萱、傑、文」會自動視為「基金」金額；新版另有台股、美股。
+    統計時會把每個人的基金＋台股＋美股加總成個人資產。
+    """
     if DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
         df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
     else:
         df = pd.DataFrame(columns=COLUMNS)
 
-    # 清除多餘欄位，補齊必要欄位
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = 0 if col != "日期" else ""
+    if "日期" not in df.columns:
+        df["日期"] = ""
+
+    # 舊版資料：日期、憲、萱、傑、文。自動搬到「基金」欄位。
+    for p in PEOPLE:
+        fund_col = f"{p}基金"
+        if fund_col not in df.columns:
+            if p in df.columns:
+                df[fund_col] = df[p]
+            else:
+                df[fund_col] = 0
+        for asset in ["台股", "美股"]:
+            col = f"{p}{asset}"
+            if col not in df.columns:
+                df[col] = 0
+
     df = df[COLUMNS].copy()
     df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
     df = df.dropna(subset=["日期"])
-    for p in PEOPLE:
-        df[p] = pd.to_numeric(df[p], errors="coerce").fillna(0).astype(int)
+    for col in DETAIL_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
     if not df.empty:
         df = df.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
         df["日期"] = df["日期"].dt.date
     return df
-
 
 def save_data(df: pd.DataFrame) -> None:
     out = df[COLUMNS].copy() if not df.empty else pd.DataFrame(columns=COLUMNS)
@@ -103,12 +120,14 @@ def save_data(df: pd.DataFrame) -> None:
         out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
     out.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
 
-
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if out.empty:
         return out
     out["日期_dt"] = pd.to_datetime(out["日期"])
+    # 每個人的總資產＝基金＋台股＋美股
+    for p in PEOPLE:
+        out[p] = out[[f"{p}{asset}" for asset in ASSET_TYPES]].sum(axis=1)
     out["總資產"] = out[PEOPLE].sum(axis=1)
     out["每日增減"] = out["總資產"].diff().fillna(0).astype(int)
     for p in PEOPLE:
@@ -116,7 +135,6 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["月份"] = out["日期_dt"].dt.strftime("%Y-%m")
     out["年度"] = out["日期_dt"].dt.year.astype(str)
     return out
-
 
 def current_period_gain(edf: pd.DataFrame, period: str) -> int:
     if edf.empty:
@@ -160,7 +178,7 @@ def annual_total_changes(edf: pd.DataFrame) -> pd.DataFrame:
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = BytesIO()
     edf = enrich(df)
-    export_df = edf[["日期", *PEOPLE, "總資產", "每日增減"]].copy() if not edf.empty else pd.DataFrame(columns=["日期", *PEOPLE, "總資產", "每日增減"])
+    export_df = edf[["日期", *DETAIL_COLUMNS, *PEOPLE, "總資產", "每日增減"]].copy() if not edf.empty else pd.DataFrame(columns=["日期", *DETAIL_COLUMNS, *PEOPLE, "總資產", "每日增減"])
     export_df["日期"] = pd.to_datetime(export_df["日期"], errors="coerce").dt.strftime("%Y-%m-%d") if not export_df.empty else export_df.get("日期", pd.Series(dtype=str))
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="每日紀錄")
@@ -303,7 +321,6 @@ def upsert_record(df: pd.DataFrame, record_date: date, values: dict[str, int]) -
     out = out.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
     return out[COLUMNS]
 
-
 def render_calendar(edf: pd.DataFrame) -> None:
     if edf.empty:
         st.info("尚無資料可以顯示月曆。")
@@ -425,21 +442,29 @@ if page == "首頁總覽":
 
 elif page == "新增／修改":
     st.subheader("新增或修改每日紀錄")
-    st.info("同一天重新儲存會自動覆蓋舊資料。")
+    st.info("同一天重新儲存會自動覆蓋舊資料。每個人的總資產會自動加總：基金＋台股＋美股。")
     default_date = raw_df.iloc[-1]["日期"] if not raw_df.empty else date.today()
     selected_date = st.date_input("日期", value=default_date)
     existing = raw_df[raw_df["日期"] == selected_date]
-    defaults = {p: int(existing.iloc[0][p]) if not existing.empty else 0 for p in PEOPLE}
+    defaults = {}
+    for p in PEOPLE:
+        for asset in ASSET_TYPES:
+            col = f"{p}{asset}"
+            defaults[col] = int(existing.iloc[0][col]) if not existing.empty and col in existing.columns else 0
 
     with st.form("edit_form"):
-        cols = st.columns(4)
         inputs = {}
-        for i, p in enumerate(PEOPLE):
-            with cols[i]:
-                inputs[p] = st.number_input(p, min_value=0, step=1, value=defaults[p], format="%d")
+        for p in PEOPLE:
+            st.markdown(f"### {p}")
+            cols = st.columns(3)
+            for i, asset in enumerate(ASSET_TYPES):
+                col = f"{p}{asset}"
+                with cols[i]:
+                    inputs[col] = st.number_input(f"{p}｜{asset}金額", min_value=0, step=1, value=defaults[col], format="%d", key=f"input_{col}")
+            st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
         submitted = st.form_submit_button("儲存這一天")
         if submitted:
-            new_df = upsert_record(raw_df, selected_date, {p: int(inputs[p]) for p in PEOPLE})
+            new_df = upsert_record(raw_df, selected_date, {col: int(inputs[col]) for col in DETAIL_COLUMNS})
             save_data(new_df)
             st.success("已儲存，資料已更新。")
             st.rerun()
@@ -462,7 +487,7 @@ elif page == "歷史紀錄":
     if edf.empty:
         st.info("尚無資料。")
     else:
-        show = edf[["日期", *PEOPLE, "總資產", "每日增減"]].copy()
+        show = edf[["日期", *DETAIL_COLUMNS, *PEOPLE, "總資產", "每日增減"]].copy()
         show["日期"] = pd.to_datetime(show["日期"]).dt.strftime("%Y-%m-%d")
         st.dataframe(show.sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
         st.markdown("### 月報表")
@@ -497,7 +522,7 @@ elif page == "匯入／匯出":
     st.divider()
     st.subheader("匯入 CSV")
     st.warning("匯入後會覆蓋目前 data.csv。請先下載備份。")
-    uploaded = st.file_uploader("選擇 CSV 檔，欄位需包含：日期、憲、萱、傑、文", type=["csv"])
+    uploaded = st.file_uploader("選擇 CSV 檔。新版欄位可包含：日期、憲基金、憲台股、憲美股...；舊版日期、憲、萱、傑、文也可匯入。", type=["csv"])
     if uploaded is not None:
         if st.button("確認匯入並覆蓋"):
             content = uploaded.getvalue()
@@ -511,15 +536,23 @@ elif page == "匯入／匯出":
             if imported is None:
                 st.error("讀取失敗，請確認 CSV 編碼。")
             else:
-                missing = [c for c in COLUMNS if c not in imported.columns]
-                if missing:
-                    st.error(f"缺少欄位：{', '.join(missing)}")
+                if "日期" not in imported.columns:
+                    st.error("缺少欄位：日期")
                 else:
+                    # 舊版欄位「憲、萱、傑、文」會匯入到基金；新版欄位直接保留。
+                    for p in PEOPLE:
+                        fund_col = f"{p}基金"
+                        if fund_col not in imported.columns:
+                            imported[fund_col] = imported[p] if p in imported.columns else 0
+                        for asset in ["台股", "美股"]:
+                            col = f"{p}{asset}"
+                            if col not in imported.columns:
+                                imported[col] = 0
                     imported = imported[COLUMNS].copy()
                     imported["日期"] = pd.to_datetime(imported["日期"], errors="coerce").dt.date
                     imported = imported.dropna(subset=["日期"])
-                    for p in PEOPLE:
-                        imported[p] = pd.to_numeric(imported[p], errors="coerce").fillna(0).astype(int)
+                    for col in DETAIL_COLUMNS:
+                        imported[col] = pd.to_numeric(imported[col], errors="coerce").fillna(0).astype(int)
                     imported = imported.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
                     save_data(imported)
                     st.success("匯入完成。")
@@ -547,9 +580,9 @@ elif page == "設定":
 else:
     st.subheader("使用說明")
     st.markdown("""
-    1. 到 **新增／修改** 輸入每天四個人的資產：憲、萱、傑、文。  
+    1. 到 **新增／修改** 輸入每天四個人的基金、台股、美股金額：憲、萱、傑、文。  
     2. 同一天重新儲存會直接覆蓋舊數字。  
-    3. 首頁會自動計算總資產、較前一筆、本月、本年增減。  
+    3. 首頁會自動計算總資產、較前一筆、本月、本年增減；基金＋台股＋美股會全部統計在一起。  
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
