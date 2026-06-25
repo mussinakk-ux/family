@@ -78,6 +78,25 @@ def signed(v) -> str:
         return "+0"
 
 
+def pct(change, base) -> float:
+    try:
+        base = float(base)
+        change = float(change)
+        if base == 0:
+            return 0.0
+        return change / base * 100
+    except Exception:
+        return 0.0
+
+
+def pct_text(v) -> str:
+    try:
+        n = float(v)
+        return ("+" if n >= 0 else "") + f"{n:.2f}%"
+    except Exception:
+        return "+0.00%"
+
+
 def load_data() -> pd.DataFrame:
     """讀取 data.csv。
     舊版欄位「憲、萱、傑、文」會自動視為「基金」金額；新版另有台股、美股。
@@ -173,6 +192,7 @@ def annual_total_changes(edf: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["年度", "年初總資產", "年末總資產", "年增減"])
     year = edf.groupby("年度").agg(年初總資產=("總資產", "first"), 年末總資產=("總資產", "last"))
     year["年增減"] = year["年末總資產"] - year["年初總資產"]
+    year["年成長率"] = (year["年增減"] / year["年初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
     return year.reset_index()
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -185,8 +205,10 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         if not edf.empty:
             month = edf.groupby("月份").agg(月初總資產=("總資產", "first"), 月末總資產=("總資產", "last"))
             month["月增減"] = month["月末總資產"] - month["月初總資產"]
+            month["月成長率"] = (month["月增減"] / month["月初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
             year = edf.groupby("年度").agg(年初總資產=("總資產", "first"), 年末總資產=("總資產", "last"))
             year["年增減"] = year["年末總資產"] - year["年初總資產"]
+            year["年成長率"] = (year["年增減"] / year["年初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
             month.reset_index().to_excel(writer, index=False, sheet_name="月報表")
             year.reset_index().to_excel(writer, index=False, sheet_name="年報表")
     return output.getvalue()
@@ -457,7 +479,8 @@ if page == "首頁總覽":
 elif page == "新增／修改":
     st.subheader("新增或修改每日紀錄")
     st.info("同一天重新儲存會自動覆蓋舊資料。每個人的總資產會自動加總：基金＋台股＋美股。")
-    default_date = raw_df.iloc[-1]["日期"] if not raw_df.empty else date.today()
+    # 新增紀錄時自動帶出今天日期；若今天已有資料，會直接帶出今天的既有數值方便修改。
+    default_date = date.today()
     selected_date = st.date_input("日期", value=default_date)
     existing = raw_df[raw_df["日期"] == selected_date]
     defaults = {}
@@ -507,10 +530,17 @@ elif page == "歷史紀錄":
         st.markdown("### 月報表")
         month = edf.groupby("月份").agg(月初總資產=("總資產", "first"), 月末總資產=("總資產", "last"))
         month["月增減"] = month["月末總資產"] - month["月初總資產"]
-        st.dataframe(month.reset_index().sort_values("月份", ascending=False), use_container_width=True, hide_index=True)
+        month["月成長率"] = (month["月增減"] / month["月初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
+        month_show = month.reset_index().sort_values("月份", ascending=False)
+        month_show["月增減"] = month_show["月增減"].apply(signed)
+        month_show["月成長率"] = month_show["月成長率"].apply(pct_text)
+        st.dataframe(month_show, use_container_width=True, hide_index=True)
         st.markdown("### 年報表")
         year = annual_total_changes(edf)
-        st.dataframe(year.sort_values("年度", ascending=False), use_container_width=True, hide_index=True)
+        year_show = year.sort_values("年度", ascending=False).copy()
+        year_show["年增減"] = year_show["年增減"].apply(signed)
+        year_show["年成長率"] = year_show["年成長率"].apply(pct_text)
+        st.dataframe(year_show, use_container_width=True, hide_index=True)
 
         st.markdown("### 從第一筆紀錄開始的每日增減累計")
         cumulative = edf[["日期", "總資產", "每日增減", *[f"{p}增減" for p in PEOPLE]]].copy()
@@ -594,9 +624,9 @@ elif page == "設定":
 else:
     st.subheader("使用說明")
     st.markdown("""
-    1. 到 **新增／修改** 輸入每天四個人的基金、台股、美股金額：憲、萱、傑、文。  
+    1. 到 **新增／修改** 輸入每天四個人的基金、台股、美股金額：憲、萱、傑、文，日期會自動帶出今天。  
     2. 同一天重新儲存會直接覆蓋舊數字。  
-    3. 首頁會自動計算總資產、較前一筆、本月、本年增減；基金＋台股＋美股會全部統計在一起。  
+    3. 首頁會自動計算總資產、較前一筆、本月、本年增減；月報表與年報表會顯示增減金額與成長率%。基金＋台股＋美股會全部統計在一起。  
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
