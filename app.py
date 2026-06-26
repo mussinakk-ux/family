@@ -365,6 +365,18 @@ def render_calendar(edf: pd.DataFrame) -> None:
     selected_month = st.selectbox("選擇月份", months, index=0)
     y, m = map(int, selected_month.split("-"))
     month_df = edf[edf["月份"] == selected_month].copy()
+
+    # 依照月份選單即時顯示該月統計：月初、月末、當月增減與成長率
+    month_start = int(month_df.iloc[0]["總資產"]) if not month_df.empty else 0
+    month_end = int(month_df.iloc[-1]["總資產"]) if not month_df.empty else 0
+    month_change = month_end - month_start
+    month_growth = pct(month_change, month_start)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("月初總資產", money(month_start))
+    c2.metric("月末總資產", money(month_end))
+    c3.metric("當月增減", signed(month_change))
+    c4.metric("當月成長率", pct_text(month_growth))
+
     lookup = {int(row["日期_dt"].day): row for _, row in month_df.iterrows()}
     weeks = calendar.Calendar(firstweekday=6).monthdayscalendar(y, m)  # Sunday first
     st.markdown('<div class="calendar-grid">' + ''.join([f'<div class="cal-head">{d}</div>' for d in ["日","一","二","三","四","五","六"]]) + '</div>', unsafe_allow_html=True)
@@ -478,7 +490,7 @@ if page == "首頁總覽":
 
 elif page == "新增／修改":
     st.subheader("新增或修改每日紀錄")
-    st.info("同一天重新儲存會自動覆蓋舊資料。每個人的總資產會自動加總：基金＋台股＋美股。")
+    st.info("同一天重新儲存會自動覆蓋舊資料。每個人的總資產會自動加總：基金＋台股＋美股；金額可輸入正數或負數。")
     # 新增紀錄時自動帶出今天日期；若今天已有資料，會直接帶出今天的既有數值方便修改。
     default_date = date.today()
     selected_date = st.date_input("日期", value=default_date)
@@ -497,7 +509,7 @@ elif page == "新增／修改":
             for i, asset in enumerate(ASSET_TYPES):
                 col = f"{p}{asset}"
                 with cols[i]:
-                    inputs[col] = st.number_input(f"{p}｜{asset}金額", min_value=0, step=1, value=defaults[col], format="%d", key=f"input_{col}")
+                    inputs[col] = st.number_input(f"{p}｜{asset}金額", step=1, value=defaults[col], format="%d", key=f"input_{col}")
             st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
         submitted = st.form_submit_button("💾 儲存這一天", type="primary", use_container_width=True)
         if submitted:
@@ -624,9 +636,9 @@ elif page == "設定":
 else:
     st.subheader("使用說明")
     st.markdown("""
-    1. 到 **新增／修改** 輸入每天四個人的基金、台股、美股金額：憲、萱、傑、文，日期會自動帶出今天。  
+    1. 到 **新增／修改** 輸入每天四個人的基金、台股、美股金額：憲、萱、傑、文，日期會自動帶出今天，且金額可輸入負數。  
     2. 同一天重新儲存會直接覆蓋舊數字。  
-    3. 首頁會自動計算總資產、較前一筆、本月、本年增減；月報表與年報表會顯示增減金額與成長率%。基金＋台股＋美股會全部統計在一起。  
+    3. 首頁會自動計算總資產、較前一筆、本月、本年增減；月報表與年報表會顯示增減金額與成長率%；月曆會依照月份選單顯示當月增減與成長率。基金＋台股＋美股會全部統計在一起。  
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
