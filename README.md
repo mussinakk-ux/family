@@ -1,42 +1,57 @@
-# 家庭資產管理系統 v3.1
+# 家庭資產管理系統 v4.1（GitHub 永久保存正式版）
 
-## 更新內容
-- APP 標題可在「設定」頁自行命名。
-- APP Emoji 可自行更換。
-- 設定會儲存在 `config.json`。
-- 瀏覽器標題與手機加入主畫面名稱會跟著設定更新。
-- 保留黑金／招財綠金切換。
-- 四人順序：憲、萱、傑、文。
-- 四人卡片 2×2 排列。
-- 支援新增、修改、刪除、匯入、匯出。
+這版修正成真正的「永久保存」流程：只要 Streamlit Cloud Secrets 設定正確，每次按「儲存這一天」、刪除、匯入 CSV，都會自動更新 GitHub 上的 `data.csv`，並額外建立備份檔到 `backup/`。
 
-## Streamlit Cloud 部署
-1. 將整包檔案上傳到 GitHub。
-2. Streamlit Cloud 選擇 `app.py` 作為主程式。
-3. 部署完成後用手機瀏覽器開啟網址。
-4. iPhone：Safari → 分享 → 加入主畫面。
+## 這版重點
 
-## 注意
-免費 Streamlit Cloud 可能因重新部署而重置本機資料，請定期在「匯入／匯出」下載 CSV 或 Excel 備份。
+- 每人可輸入：基金、美股、台股
+- 支援正數與負數
+- 日期自動帶出今天
+- 月報表、年報表顯示成長率 %
+- 月曆可依月份顯示當月增減與成長率
+- APP 名稱 / Emoji 可自訂
+- 黑金 / 招財綠金切換
+- 新增、修改、刪除、匯入後，自動同步到 GitHub
+- 每次儲存會自動建立 `backup/data_年月日_時分秒.csv`
+- 如果沒有設定 GitHub Secrets，系統會拒絕儲存，避免資料只存在 Streamlit 暫存空間
 
+## 必做：設定 Streamlit Secrets
 
-## v3.1 更新
-- 每個人新增「基金、台股、美股」三個輸入欄位。
-- 舊資料自動視為「基金」金額。
-- 所有統計維持不變，會把基金＋台股＋美股全部加總計算。
+到 Streamlit Cloud：
 
+`App → Settings → Secrets`
 
-## v3.1 更新
-- 新增／修改頁的「儲存這一天」按鈕改成更明顯的亮綠金色。
-- 輸入欄位順序調整為：基金、美股、台股。
+貼上：
 
+```toml
+GITHUB_TOKEN = "你的 GitHub Personal Access Token"
+GITHUB_REPO = "mussinakk-ux/family"
+GITHUB_BRANCH = "main"
+GITHUB_DATA_PATH = "data.csv"
+GITHUB_CONFIG_PATH = "config.json"
+GITHUB_ENABLE_BACKUP = "true"
+GITHUB_BACKUP_DIR = "backup"
+```
 
-## v3.3 更新
-- 新增／修改頁日期自動帶出今天。
-- 月報表與年報表新增成長率百分比。
+## GitHub Token 權限
 
+建議使用 Fine-grained token：
 
-## v3.3 更新
-- 所有金額欄位支援負數，可記錄股票大跌或資產減損。
-- 月曆頁會隨月份選單顯示：月初總資產、月末總資產、當月增減、當月成長率。
-- 假日沒有紀錄不會影響計算；系統以「上一筆紀錄」作為比較基準。
+1. GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens
+2. Generate new token
+3. Repository access 選 `mussinakk-ux/family`
+4. Permissions → Repository permissions → Contents 選 `Read and write`
+5. Generate token
+6. 複製 token 貼到 Streamlit Secrets 的 `GITHUB_TOKEN`
+
+## 使用方式
+
+1. 解壓縮 ZIP
+2. 將內容上傳 / 覆蓋到 GitHub repo：`mussinakk-ux/family`
+3. 到 Streamlit Cloud 部署或重新啟動 app
+4. 確認首頁「GitHub 永久保存狀態」顯示已啟用
+5. 之後每天按「儲存這一天」後，資料會永久寫入 GitHub
+
+## 重要提醒
+
+v4.1 以 GitHub 上的 `data.csv` 作為資料來源。只要 Secrets 設定正確，電腦關機、手機關閉、Streamlit 重新啟動、重新部署，都會讀取 GitHub 最新資料。

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 import calendar
 import json
+import base64
+import os
+
+import requests
 
 import pandas as pd
 import plotly.express as px
@@ -15,8 +19,120 @@ DEFAULT_APP_ICON = "💰"
 CONFIG_FILE = Path("config.json")
 
 
+# ===== GitHub 永久保存設定 =====
+# 在 Streamlit Cloud → Settings → Secrets 貼上：
+# GITHUB_TOKEN = "你的 GitHub token"
+# GITHUB_REPO = "帳號/Repository名稱"  例如 "mussinakk/family"
+# GITHUB_BRANCH = "main"
+# GITHUB_DATA_PATH = "data.csv"
+# GITHUB_CONFIG_PATH = "config.json"
+def _secret(name: str, default: str = "") -> str:
+    """同時支援 Streamlit secrets 與環境變數。"""
+    try:
+        if name in st.secrets:
+            return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        pass
+    return str(os.environ.get(name, default)).strip()
+
+
+def github_settings() -> dict:
+    return {
+        "token": _secret("GITHUB_TOKEN"),
+        "repo": _secret("GITHUB_REPO"),
+        "branch": _secret("GITHUB_BRANCH", "main") or "main",
+        "data_path": _secret("GITHUB_DATA_PATH", "data.csv") or "data.csv",
+        "config_path": _secret("GITHUB_CONFIG_PATH", "config.json") or "config.json",
+    }
+
+
+def github_enabled() -> bool:
+    g = github_settings()
+    return bool(g["token"] and g["repo"])
+
+
+def github_headers() -> dict:
+    g = github_settings()
+    return {
+        "Authorization": f"Bearer {g['token']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def github_get_file(path: str) -> tuple[bytes | None, str | None, str | None]:
+    """回傳：(content_bytes, sha, error)。404 代表檔案不存在。"""
+    if not github_enabled():
+        return None, None, "尚未設定 GitHub 同步"
+    g = github_settings()
+    url = f"https://api.github.com/repos/{g['repo']}/contents/{path}"
+    try:
+        r = requests.get(url, headers=github_headers(), params={"ref": g["branch"]}, timeout=20)
+        if r.status_code == 404:
+            return None, None, None
+        if r.status_code >= 400:
+            return None, None, f"GitHub 讀取失敗：{r.status_code} {r.text[:300]}"
+        data = r.json()
+        content = base64.b64decode(data.get("content", "")) if data.get("content") else b""
+        return content, data.get("sha"), None
+    except Exception as e:
+        return None, None, f"GitHub 讀取錯誤：{e}"
+
+
+def github_put_file(path: str, content: bytes, message: str, retry: bool = True) -> tuple[bool, str]:
+    """新增或覆蓋 GitHub 檔案，成功後代表資料已永久寫入 GitHub。"""
+    if not github_enabled():
+        return False, "尚未設定 GitHub 同步，為避免資料遺失，本版本不允許只存到 Streamlit 暫存空間。"
+    g = github_settings()
+    _, sha, err = github_get_file(path)
+    if err:
+        return False, err
+    url = f"https://api.github.com/repos/{g['repo']}/contents/{path}"
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content).decode("ascii"),
+        "branch": g["branch"],
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        r = requests.put(url, headers=github_headers(), json=payload, timeout=30)
+        if r.status_code in (409, 422) and retry:
+            # GitHub 版本衝突時重新取得最新 sha 後再存一次。
+            return github_put_file(path, content, message + " retry", retry=False)
+        if r.status_code >= 400:
+            return False, f"GitHub 儲存失敗：{r.status_code} {r.text[:500]}"
+        return True, "已同步到 GitHub，資料永久保存。"
+    except Exception as e:
+        return False, f"GitHub 儲存錯誤：{e}"
+
+
+def github_backup_data(content: bytes) -> None:
+    """額外建立備份 CSV。失敗不阻擋主要儲存。"""
+    if not github_enabled():
+        return
+    enable = _secret("GITHUB_ENABLE_BACKUP", "true").lower()
+    if enable not in ("1", "true", "yes", "y", "on"):
+        return
+    backup_dir = _secret("GITHUB_BACKUP_DIR", "backup") or "backup"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    github_put_file(f"{backup_dir}/data_{ts}.csv", content, f"Backup family asset data {ts}", retry=False)
+
+
+
 def load_config() -> dict:
     default = {"app_name": DEFAULT_APP_TITLE, "app_icon": DEFAULT_APP_ICON, "theme": "黑金尊爵版"}
+    if github_enabled():
+        content, _, err = github_get_file(github_settings()["config_path"])
+        if content and not err:
+            try:
+                data = json.loads(content.decode("utf-8"))
+                if isinstance(data, dict):
+                    default.update({k: v for k, v in data.items() if v is not None})
+                    CONFIG_FILE.write_bytes(content)
+                    return default
+            except Exception:
+                pass
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -28,7 +144,12 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    text = json.dumps(config, ensure_ascii=False, indent=2)
+    CONFIG_FILE.write_text(text, encoding="utf-8")
+    if github_enabled():
+        ok, msg = github_put_file(github_settings()["config_path"], text.encode("utf-8"), "Update app config")
+        if not ok:
+            st.warning(msg)
 
 
 APP_CONFIG = load_config()
@@ -99,10 +220,20 @@ def pct_text(v) -> str:
 
 def load_data() -> pd.DataFrame:
     """讀取 data.csv。
+    v4.0 起會優先從 GitHub 讀取，確保 Streamlit 重啟後仍讀到最新永久資料。
     舊版欄位「憲、萱、傑、文」會自動視為「基金」金額；新版另有台股、美股。
     統計時會把每個人的基金＋台股＋美股加總成個人資產。
     """
-    if DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
+    if github_enabled():
+        content, _, err = github_get_file(github_settings()["data_path"])
+        if content and not err:
+            DATA_FILE.write_bytes(content)
+            df = pd.read_csv(BytesIO(content), encoding="utf-8-sig")
+        elif DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
+            df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+        else:
+            df = pd.DataFrame(columns=COLUMNS)
+    elif DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
         df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
     else:
         df = pd.DataFrame(columns=COLUMNS)
@@ -133,11 +264,19 @@ def load_data() -> pd.DataFrame:
         df["日期"] = df["日期"].dt.date
     return df
 
-def save_data(df: pd.DataFrame) -> None:
+def save_data(df: pd.DataFrame) -> tuple[bool, str]:
     out = df[COLUMNS].copy() if not df.empty else pd.DataFrame(columns=COLUMNS)
     if not out.empty:
         out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
-    out.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
+    csv_text = out.to_csv(index=False, encoding="utf-8-sig")
+    DATA_FILE.write_text(csv_text, encoding="utf-8-sig")
+    if github_enabled():
+        return github_put_file(
+            github_settings()["data_path"],
+            csv_text.encode("utf-8-sig"),
+            "Update family asset data"
+        )
+    return True, "已儲存到本機檔案。提醒：尚未設定 GitHub 同步，Streamlit Cloud 重新啟動後可能遺失。"
 
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -431,6 +570,15 @@ with st.expander("🎨 介面配色", expanded=False):
 
 page = st.session_state.page
 
+with st.expander("☁️ GitHub 永久保存狀態", expanded=False):
+    if github_enabled():
+        g = github_settings()
+        st.success(f"已啟用 GitHub 自動同步：{g['repo']} / {g['branch']} / {g['data_path']}")
+        st.caption("每次新增、修改、刪除、匯入資料，都會自動 Commit 到 GitHub 的 data.csv，並可自動備份到 backup/。")
+    else:
+        st.error("尚未啟用 GitHub 自動同步。為避免資料再次消失，本版本在未設定 Secrets 前不會儲存新資料。")
+        st.caption("請到 Streamlit Cloud → App → Settings → Secrets，設定 GITHUB_TOKEN、GITHUB_REPO、GITHUB_BRANCH。")
+
 if page == "首頁總覽":
     if edf.empty:
         st.warning("目前沒有資料，請先到『新增／修改』輸入第一筆紀錄。")
@@ -514,9 +662,12 @@ elif page == "新增／修改":
         submitted = st.form_submit_button("💾 儲存這一天", type="primary", use_container_width=True)
         if submitted:
             new_df = upsert_record(raw_df, selected_date, {col: int(inputs[col]) for col in DETAIL_COLUMNS})
-            save_data(new_df)
-            st.success("已儲存，資料已更新。")
-            st.rerun()
+            ok, msg = save_data(new_df)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
     st.divider()
     st.subheader("刪除單日紀錄")
@@ -527,9 +678,12 @@ elif page == "新增／修改":
         del_date = st.selectbox("選擇要刪除的日期", dates, index=len(dates)-1)
         if st.button("刪除選取日期", type="secondary"):
             new_df = raw_df[pd.to_datetime(raw_df["日期"]).dt.strftime("%Y-%m-%d") != del_date]
-            save_data(new_df)
-            st.success(f"已刪除 {del_date}")
-            st.rerun()
+            ok, msg = save_data(new_df)
+            if ok:
+                st.success(f"已刪除 {del_date}，{msg}")
+                st.rerun()
+            else:
+                st.error(msg)
 
 elif page == "歷史紀錄":
     st.subheader("歷史紀錄與報表")
@@ -610,9 +764,12 @@ elif page == "匯入／匯出":
                     for col in DETAIL_COLUMNS:
                         imported[col] = pd.to_numeric(imported[col], errors="coerce").fillna(0).astype(int)
                     imported = imported.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
-                    save_data(imported)
-                    st.success("匯入完成。")
-                    st.rerun()
+                    ok, msg = save_data(imported)
+                    if ok:
+                        st.success(f"匯入完成，{msg}")
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 elif page == "設定":
     st.subheader("APP 名稱設定")
@@ -642,5 +799,5 @@ else:
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
-    注意：Streamlit Cloud 免費版本機檔案可能因重新部署而重置，建議固定下載 CSV 或 Excel 備份。
+    v4.0 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
     """)
