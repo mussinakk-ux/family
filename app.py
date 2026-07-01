@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+APP_VERSION = "v6.0 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 CONFIG_FILE = Path("config.json")
@@ -37,14 +38,27 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def github_settings() -> dict:
-    # 支援兩種 Secrets 寫法：
-    # 1) GITHUB_REPO = "mussinakk-ux/family"
-    # 2) GITHUB_OWNER = "mussinakk-ux" + GITHUB_REPO_NAME = "family"
-    repo_full = _secret("GITHUB_REPO")
+    """讀取 GitHub 同步設定。
+
+    支援兩種 Streamlit Secrets 寫法：
+    A. GITHUB_OWNER="mussinakk-ux" + GITHUB_REPO="family"
+    B. GITHUB_REPO="mussinakk-ux/family"
+
+    這裡特別處理 GITHUB_REPO="family" 的情況，避免被當成完整 repo 路徑而失敗。
+    """
     owner = _secret("GITHUB_OWNER")
+    repo_value = _secret("GITHUB_REPO")
     repo_name = _secret("GITHUB_REPO_NAME")
-    if not repo_full and owner and repo_name:
+
+    if repo_value and "/" in repo_value:
+        repo_full = repo_value
+    elif owner and repo_value:
+        repo_full = f"{owner}/{repo_value}"
+    elif owner and repo_name:
         repo_full = f"{owner}/{repo_name}"
+    else:
+        repo_full = repo_value
+
     return {
         "token": _secret("GITHUB_TOKEN"),
         "repo": repo_full,
@@ -570,6 +584,7 @@ raw_df = load_data()
 edf = enrich(raw_df)
 
 st.title(f"{APP_ICON} {APP_TITLE}")
+st.caption(APP_VERSION)
 nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "設定", "使用說明"]
 st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
 nav_cols = st.columns(len(nav_pages))
@@ -596,7 +611,7 @@ with st.expander("☁️ GitHub 永久保存狀態", expanded=False):
     if github_enabled():
         g = github_settings()
         st.success(f"已啟用 GitHub 自動同步：{g['repo']} / {g['branch']} / {g['data_path']}")
-        st.caption("每次新增、修改、刪除、匯入資料，都會自動 Commit 到 GitHub 的 data.csv，並可自動備份到 backup/。")
+        st.caption(f"{APP_VERSION}｜每次新增、修改、刪除、匯入資料，都會自動 Commit 到 GitHub 的 data.csv，並自動備份到 backup/。")
     else:
         st.error("尚未啟用 GitHub 自動同步。為避免資料再次消失，本版本在未設定 Secrets 前不會儲存新資料。")
         st.caption("請到 Streamlit Cloud → App → Settings → Secrets，設定 GITHUB_TOKEN、GITHUB_REPO、GITHUB_BRANCH。")
@@ -821,5 +836,5 @@ else:
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
-    v5.0 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
+    v6.0 Ultimate 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv，並建立 backup 備份；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
     """)
