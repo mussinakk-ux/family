@@ -37,9 +37,17 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def github_settings() -> dict:
+    # 支援兩種 Secrets 寫法：
+    # 1) GITHUB_REPO = "mussinakk-ux/family"
+    # 2) GITHUB_OWNER = "mussinakk-ux" + GITHUB_REPO_NAME = "family"
+    repo_full = _secret("GITHUB_REPO")
+    owner = _secret("GITHUB_OWNER")
+    repo_name = _secret("GITHUB_REPO_NAME")
+    if not repo_full and owner and repo_name:
+        repo_full = f"{owner}/{repo_name}"
     return {
         "token": _secret("GITHUB_TOKEN"),
-        "repo": _secret("GITHUB_REPO"),
+        "repo": repo_full,
         "branch": _secret("GITHUB_BRANCH", "main") or "main",
         "data_path": _secret("GITHUB_DATA_PATH", "data.csv") or "data.csv",
         "config_path": _secret("GITHUB_CONFIG_PATH", "config.json") or "config.json",
@@ -220,7 +228,7 @@ def pct_text(v) -> str:
 
 def load_data() -> pd.DataFrame:
     """讀取 data.csv。
-    v4.0 起會優先從 GitHub 讀取，確保 Streamlit 重啟後仍讀到最新永久資料。
+    v5.0 起會優先從 GitHub 讀取，確保 Streamlit 重啟後仍讀到最新永久資料。
     舊版欄位「憲、萱、傑、文」會自動視為「基金」金額；新版另有台股、美股。
     統計時會把每個人的基金＋台股＋美股加總成個人資產。
     """
@@ -265,18 +273,32 @@ def load_data() -> pd.DataFrame:
     return df
 
 def save_data(df: pd.DataFrame) -> tuple[bool, str]:
+    """永久保存資料。
+
+    v5.0 正式版：沒有 GitHub Secrets 時，直接拒絕儲存，
+    避免資料只存在 Streamlit 暫存空間而再次消失。
+    """
+    if not github_enabled():
+        return False, "尚未設定 GitHub Secrets，為避免資料再次消失，本版本不允許儲存到 Streamlit 暫存空間。請先設定 GITHUB_TOKEN、GITHUB_REPO、GITHUB_BRANCH。"
+
     out = df[COLUMNS].copy() if not df.empty else pd.DataFrame(columns=COLUMNS)
     if not out.empty:
         out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
     csv_text = out.to_csv(index=False, encoding="utf-8-sig")
-    DATA_FILE.write_text(csv_text, encoding="utf-8-sig")
-    if github_enabled():
-        return github_put_file(
-            github_settings()["data_path"],
-            csv_text.encode("utf-8-sig"),
-            "Update family asset data"
-        )
-    return True, "已儲存到本機檔案。提醒：尚未設定 GitHub 同步，Streamlit Cloud 重新啟動後可能遺失。"
+    csv_bytes = csv_text.encode("utf-8-sig")
+
+    ok, msg = github_put_file(
+        github_settings()["data_path"],
+        csv_bytes,
+        f"Update family asset data {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    if not ok:
+        return False, msg
+
+    # GitHub 寫入成功後才更新本機快取。
+    DATA_FILE.write_bytes(csv_bytes)
+    github_backup_data(csv_bytes)
+    return True, "已成功同步到 GitHub data.csv，並建立備份；資料已永久保存。"
 
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -799,5 +821,5 @@ else:
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
-    v4.0 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
+    v5.0 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
     """)
