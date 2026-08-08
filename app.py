@@ -5,6 +5,7 @@ import calendar
 import html
 import json
 import os
+import sqlite3
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -17,7 +18,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-APP_VERSION = "v7.1 Ultimate"
+APP_VERSION = "v7.0 Ultimate Final"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -25,25 +26,26 @@ PEOPLE = ["憲", "萱", "傑", "文"]
 ASSET_TYPES = ["基金", "美股", "台股"]
 DETAIL_COLUMNS = [f"{p}{a}" for p in PEOPLE for a in ASSET_TYPES]
 COLUMNS = ["日期", *DETAIL_COLUMNS]
-DATA_FILE = Path("data.csv")
+DATA_FILE = Path("data.csv")  # CSV 鏡像/人工備份
+DB_FILE = Path("family_asset.db")  # 正式 SQLite 主資料庫
 CONFIG_FILE = Path("config.json")
 
 PERSON_STYLE = {
-    "憲": {"line": "#2f75b5", "soft": "#eef5ff", "dark": "#174a7e", "icon": "👤"},
-    "萱": {"line": "#d54d73", "soft": "#fff0f4", "dark": "#8f2344", "icon": "👤"},
-    "傑": {"line": "#5f8f44", "soft": "#f1f7ea", "dark": "#365a25", "icon": "👤"},
-    "文": {"line": "#c48228", "soft": "#fff6e8", "dark": "#805114", "icon": "👤"},
+    "憲": {"line": "#4ea1ff"},
+    "萱": {"line": "#ff6d98"},
+    "傑": {"line": "#6ee58d"},
+    "文": {"line": "#d997ff"},
 }
 
 THEMES = {
     "黑金尊爵版": {
         "bg": "#070707", "panel": "#11110f", "panel2": "#17150f", "gold": "#e4b843",
-        "gold2": "#8f6b1f", "text": "#f7f0dd", "muted": "#b9ab83", "good": "#7bd85b",
+        "gold2": "#8f6b1f", "text": "#ffffff", "muted": "#d8d8d8", "good": "#67e26e",
         "bad": "#ff6b6b", "border": "rgba(228,184,67,.70)"
     },
     "招財綠金版": {
         "bg": "#04130e", "panel": "#0b2118", "panel2": "#103123", "gold": "#e2bd58",
-        "gold2": "#1d7550", "text": "#fff7d8", "muted": "#cabd8c", "good": "#73e7a8",
+        "gold2": "#1d7550", "text": "#ffffff", "muted": "#e2e2e2", "good": "#73e7a8",
         "bad": "#ff7777", "border": "rgba(226,189,88,.72)"
     },
 }
@@ -78,6 +80,7 @@ def github_settings() -> dict:
         "token": _secret("GITHUB_TOKEN"),
         "repo": repo_full,
         "branch": _secret("GITHUB_BRANCH", "main") or "main",
+        "db_path": _secret("GITHUB_DB_PATH", "family_asset.db") or "family_asset.db",
         "data_path": _secret("GITHUB_DATA_PATH", "data.csv") or "data.csv",
         "config_path": _secret("GITHUB_CONFIG_PATH", "config.json") or "config.json",
         "backup_dir": _secret("GITHUB_BACKUP_DIR", "backup") or "backup",
@@ -142,6 +145,50 @@ def github_put_file(path: str, content: bytes, message: str, retry: bool = True)
         return False, f"GitHub 儲存錯誤：{exc}"
 
 
+def github_commit_files(files: dict[str, bytes], message: str, retry: bool = True) -> tuple[bool, str]:
+    """以單一 Git commit 同步 SQLite、CSV 鏡像與備份，降低版本衝突。"""
+    if not github_enabled():
+        return False, "GitHub 永久保存未啟用，為避免資料只留在 Streamlit 暫存空間，本版本拒絕儲存。"
+    g = github_settings()
+    base = f"https://api.github.com/repos/{g['repo']}"
+    headers = github_headers()
+    try:
+        ref_url = f"{base}/git/ref/heads/{quote(g['branch'], safe='')}"
+        rr = requests.get(ref_url, headers=headers, timeout=25)
+        if rr.status_code >= 400:
+            return False, f"GitHub 取得分支失敗：{rr.status_code} {rr.text[:300]}"
+        parent_sha = rr.json()["object"]["sha"]
+        cr = requests.get(f"{base}/git/commits/{parent_sha}", headers=headers, timeout=25)
+        if cr.status_code >= 400:
+            return False, f"GitHub 取得 Commit 失敗：{cr.status_code} {cr.text[:300]}"
+        base_tree = cr.json()["tree"]["sha"]
+        tree = []
+        for path, raw in files.items():
+            br = requests.post(f"{base}/git/blobs", headers=headers,
+                json={"content": base64.b64encode(raw).decode("ascii"), "encoding": "base64"}, timeout=30)
+            if br.status_code >= 400:
+                return False, f"GitHub 建立資料 Blob 失敗：{br.status_code} {br.text[:300]}"
+            tree.append({"path": path, "mode": "100644", "type": "blob", "sha": br.json()["sha"]})
+        tr = requests.post(f"{base}/git/trees", headers=headers,
+            json={"base_tree": base_tree, "tree": tree}, timeout=30)
+        if tr.status_code >= 400:
+            return False, f"GitHub 建立 Tree 失敗：{tr.status_code} {tr.text[:300]}"
+        nr = requests.post(f"{base}/git/commits", headers=headers,
+            json={"message": message, "tree": tr.json()["sha"], "parents": [parent_sha]}, timeout=30)
+        if nr.status_code >= 400:
+            return False, f"GitHub 建立 Commit 失敗：{nr.status_code} {nr.text[:300]}"
+        new_sha = nr.json()["sha"]
+        ur = requests.patch(f"{base}/git/refs/heads/{quote(g['branch'], safe='')}", headers=headers,
+            json={"sha": new_sha, "force": False}, timeout=30)
+        if ur.status_code in (409, 422) and retry:
+            return github_commit_files(files, message + " (retry)", retry=False)
+        if ur.status_code >= 400:
+            return False, f"GitHub 更新分支失敗：{ur.status_code} {ur.text[:400]}"
+        return True, f"已永久保存至 GitHub（Commit {new_sha[:7]}）"
+    except Exception as exc:
+        return False, f"GitHub 永久保存錯誤：{exc}"
+
+
 def github_list_backups() -> tuple[list[dict], str | None]:
     if not github_enabled():
         return [], "尚未設定 GitHub 同步"
@@ -202,17 +249,14 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "日期" not in df.columns:
         raise ValueError("匯入檔缺少『日期』欄位")
-
-    # 相容最早期只有四人總數值的資料：視為基金。
-    for p in PEOPLE:
-        fund = f"{p}基金"
+    for person in PEOPLE:
+        fund = f"{person}基金"
         if fund not in df.columns:
-            df[fund] = df[p] if p in df.columns else 0
-        for a in ("美股", "台股"):
-            col = f"{p}{a}"
+            df[fund] = df[person] if person in df.columns else 0
+        for asset in ("美股", "台股"):
+            col = f"{person}{asset}"
             if col not in df.columns:
                 df[col] = 0
-
     df = df[COLUMNS].copy()
     df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
     df = df.dropna(subset=["日期"])
@@ -225,18 +269,46 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_data() -> pd.DataFrame:
-    if github_enabled():
-        content, _, err = github_get_file(github_settings()["data_path"])
-        if content and not err:
-            DATA_FILE.write_bytes(content)
-            try:
-                return normalize_df(pd.read_csv(BytesIO(content), encoding="utf-8-sig"))
-            except UnicodeDecodeError:
-                return normalize_df(pd.read_csv(BytesIO(content)))
-    if DATA_FILE.exists() and DATA_FILE.stat().st_size:
-        return normalize_df(pd.read_csv(DATA_FILE, encoding="utf-8-sig"))
-    return pd.DataFrame(columns=COLUMNS)
+def _create_db_schema(conn: sqlite3.Connection) -> None:
+    cols = ",\n".join([f'"{c}" INTEGER NOT NULL DEFAULT 0' for c in DETAIL_COLUMNS])
+    sql = "CREATE TABLE IF NOT EXISTS asset_records (record_date TEXT PRIMARY KEY," + cols + ",updated_at TEXT NOT NULL)"
+    conn.execute(sql)
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.commit()
+
+
+def write_df_to_db(df: pd.DataFrame, db_path: Path = DB_FILE) -> None:
+    clean = normalize_df(df)
+    if db_path.exists():
+        db_path.unlink()
+    conn = sqlite3.connect(db_path)
+    try:
+        _create_db_schema(conn)
+        col_sql = ",".join(["record_date", *[f'"{c}"' for c in DETAIL_COLUMNS], "updated_at"])
+        placeholders = ",".join(["?"] * (2 + len(DETAIL_COLUMNS)))
+        sql = f"INSERT OR REPLACE INTO asset_records ({col_sql}) VALUES ({placeholders})"
+        stamp = now_tw().isoformat()
+        for _, row in clean.iterrows():
+            conn.execute(sql, [str(row["日期"]), *[int(row[c]) for c in DETAIL_COLUMNS], stamp])
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version','7')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def read_df_from_db(db_path: Path = DB_FILE) -> pd.DataFrame:
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return pd.DataFrame(columns=COLUMNS)
+    conn = sqlite3.connect(db_path)
+    try:
+        _create_db_schema(conn)
+        sql = "SELECT record_date," + ",".join([f'"{c}"' for c in DETAIL_COLUMNS]) + " FROM asset_records ORDER BY record_date"
+        df = pd.read_sql_query(sql, conn)
+    finally:
+        conn.close()
+    if df.empty:
+        return pd.DataFrame(columns=COLUMNS)
+    return normalize_df(df.rename(columns={"record_date": "日期"}))
 
 
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -244,27 +316,139 @@ def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     if not out.empty:
         out = out.copy()
         out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
-    # utf-8-sig 是 Excel 中文相容格式。
     return out.to_csv(index=False).encode("utf-8-sig")
+
+
+def load_data() -> pd.DataFrame:
+    # 正式來源：GitHub SQLite。若尚未建立則從既有 data.csv 自動遷移。
+    if github_enabled():
+        g = github_settings()
+        db_raw, _, db_err = github_get_file(g["db_path"])
+        if db_raw and not db_err:
+            DB_FILE.write_bytes(db_raw)
+            try:
+                return read_df_from_db(DB_FILE)
+            except Exception as exc:
+                st.warning(f"SQLite 主資料讀取失敗，改讀 CSV 備援：{exc}")
+        csv_raw, _, csv_err = github_get_file(g["data_path"])
+        if csv_raw and not csv_err:
+            DATA_FILE.write_bytes(csv_raw)
+            try:
+                try:
+                    df = normalize_df(pd.read_csv(BytesIO(csv_raw), encoding="utf-8-sig"))
+                except UnicodeDecodeError:
+                    df = normalize_df(pd.read_csv(BytesIO(csv_raw)))
+                write_df_to_db(df, DB_FILE)
+                github_commit_files({g["db_path"]: DB_FILE.read_bytes()}, "Initialize v7 SQLite database from existing data.csv")
+                return df
+            except Exception as exc:
+                st.error(f"既有 data.csv 自動遷移失敗：{exc}")
+    if DB_FILE.exists():
+        try:
+            return read_df_from_db(DB_FILE)
+        except Exception:
+            pass
+    if DATA_FILE.exists() and DATA_FILE.stat().st_size:
+        try:
+            return normalize_df(pd.read_csv(DATA_FILE, encoding="utf-8-sig"))
+        except Exception:
+            return normalize_df(pd.read_csv(DATA_FILE))
+    return pd.DataFrame(columns=COLUMNS)
 
 
 def save_data(df: pd.DataFrame, reason: str = "save") -> tuple[bool, str]:
     if not github_enabled():
-        return False, "GitHub 永久保存未啟用，為避免再次遺失資料，本版本不允許儲存。"
+        return False, "GitHub 永久保存未啟用，為避免資料再次遺失，本版本不允許儲存。"
     clean = normalize_df(df)
-    raw = dataframe_to_csv_bytes(clean)
-    ok, msg = github_put_file(
-        github_settings()["data_path"],
-        raw,
-        f"Update family asset data {now_tw().strftime('%Y-%m-%d %H:%M:%S')}",
-    )
-    if not ok:
-        return False, msg
-    DATA_FILE.write_bytes(raw)
-    backup_ok, backup_msg = make_backup(raw, reason)
-    if backup_ok:
-        return True, f"{msg}；已建立自動備份"
-    return True, f"{msg}；主要資料已保存（備份提示：{backup_msg}）"
+    write_df_to_db(clean, DB_FILE)
+    db_raw = DB_FILE.read_bytes()
+    csv_raw = dataframe_to_csv_bytes(clean)
+    DATA_FILE.write_bytes(csv_raw)
+    g = github_settings()
+    stamp = now_tw().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{g['backup_dir']}/data_{stamp}_{reason}.csv"
+    ok, msg = github_commit_files({g["db_path"]: db_raw, g["data_path"]: csv_raw, backup_path: csv_raw},
+        f"Save family assets {now_tw().strftime('%Y-%m-%d %H:%M:%S')} ({reason})")
+    if ok:
+        return True, f"{msg}；SQLite 主資料、CSV 鏡像與自動備份已一次完成"
+    return False, msg
+
+
+def make_backup(csv_bytes: bytes, reason: str = "manual") -> tuple[bool, str]:
+    if not github_enabled():
+        return False, "尚未設定 GitHub 同步"
+    g = github_settings()
+    stamp = now_tw().strftime("%Y%m%d_%H%M%S")
+    path = f"{g['backup_dir']}/data_{stamp}_{reason}.csv"
+    return github_commit_files({path: csv_bytes}, f"Backup family asset data {stamp} ({reason})")
+
+
+def load_config() -> dict:
+    cfg = {"app_name": DEFAULT_APP_TITLE, "app_icon": DEFAULT_APP_ICON, "theme": "黑金尊爵版"}
+    if github_enabled():
+        content, _, err = github_get_file(github_settings()["config_path"])
+        if content and not err:
+            try:
+                cfg.update(json.loads(content.decode("utf-8")))
+                CONFIG_FILE.write_bytes(content)
+                return cfg
+            except Exception:
+                pass
+    if CONFIG_FILE.exists():
+        try:
+            cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return cfg
+
+
+def save_config(cfg: dict) -> tuple[bool, str]:
+    raw = json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+    CONFIG_FILE.write_bytes(raw)
+    if not github_enabled():
+        return False, "設定只寫入暫存空間；請先設定 GitHub Secrets。"
+    return github_commit_files({github_settings()["config_path"]: raw}, "Update family asset app config")
+
+
+def excel_bytes(df: pd.DataFrame) -> bytes:
+    edf = enrich(df)
+    daily = edf.copy()
+    if not daily.empty:
+        daily["日期"] = daily["日期"].astype(str)
+        daily = daily[["日期", *DETAIL_COLUMNS, *[f"{p}總資產" for p in PEOPLE], "總資產", "每日增減"]]
+    month = monthly_report(edf)
+    year = yearly_report(edf)
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        daily.to_excel(writer, index=False, sheet_name="每日紀錄")
+        month.to_excel(writer, index=False, sheet_name="月報表")
+        year.to_excel(writer, index=False, sheet_name="年報表")
+    return output.getvalue()
+
+
+def parse_import(uploaded) -> pd.DataFrame:
+    name = uploaded.name.lower()
+    raw = uploaded.getvalue()
+    if name.endswith(".csv"):
+        try:
+            df = pd.read_csv(BytesIO(raw), encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            df = pd.read_csv(BytesIO(raw))
+    elif name.endswith(".xlsx") or name.endswith(".xls"):
+        df = pd.read_excel(BytesIO(raw), sheet_name=0)
+    else:
+        raise ValueError("只支援 CSV 或 Excel (.xlsx) 檔")
+    return normalize_df(df)
+
+
+def upsert_record(df: pd.DataFrame, record_date: date, values: dict[str, int]) -> pd.DataFrame:
+    current = normalize_df(df)
+    new = pd.DataFrame([{"日期": record_date, **values}])
+    return normalize_df(pd.concat([current, new], ignore_index=True))
+
+
+def merge_import(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    return normalize_df(pd.concat([normalize_df(existing), normalize_df(incoming)], ignore_index=True))
 
 
 def money(v) -> str:
@@ -454,8 +638,8 @@ def inject_css(theme_name: str) -> None:
       .stButton>button:hover * {{color:{t['gold']}!important;}}
       /* 所有深色區塊的操作文字維持高對比 */
       div[data-testid="stSegmentedControl"] {{border-radius:10px;overflow:hidden;}}
-      div[data-testid="stSegmentedControl"] button {{background:#151515!important;border-color:{t['border']}!important;color:#FFFFFF!important;}}
-      div[data-testid="stSegmentedControl"] button * {{color:#FFFFFF!important;opacity:1!important;}}
+      div[data-testid="stSegmentedControl"] button {{background:#F5F6FA!important;border-color:#c8c8c8!important;color:#111111!important;}}
+      div[data-testid="stSegmentedControl"] button * {{color:#111111!important;opacity:1!important;font-weight:850!important;}}
       div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {{background:{t['gold']}!important;color:#111111!important;}}
       div[data-testid="stSegmentedControl"] button[aria-pressed="true"] * {{color:#111111!important;}}
       div[data-testid="stSelectbox"] label, div[data-testid="stDateInput"] label, div[data-testid="stNumberInput"] label, div[data-testid="stTextInput"] label, div[data-testid="stFileUploader"] label, div[data-testid="stRadio"] label {{color:#FFFFFF!important;opacity:1!important;}}
@@ -569,7 +753,8 @@ def plot_asset_distribution(edf: pd.DataFrame):
     fig = px.pie(dfp, names="類別", values="金額", hole=.58, color="類別",
                  color_discrete_map={"基金":"#d5547c","美股":"#5e934e","台股":"#3d83c5"})
     fig.update_traces(textposition="outside", textinfo="percent+label", hovertemplate="%{label}<br>%{value:,.0f}<br>%{percent}<extra></extra>")
-    fig.update_layout(height=300, margin=dict(l=8,r=8,t=8,b=8), showlegend=True, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd")
+    fig.update_traces(textfont=dict(color="#FFFFFF", size=13))
+    fig.update_layout(height=300, margin=dict(l=8,r=8,t=8,b=8), showlegend=True, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#FFFFFF", legend=dict(font=dict(color="#FFFFFF", size=14)))
     return fig
 
 
@@ -597,7 +782,7 @@ def plot_people(edf: pd.DataFrame, months: int | None = 12):
     fig = go.Figure()
     for p in PEOPLE:
         fig.add_trace(go.Scatter(x=d["日期_dt"], y=d[f"{p}總資產"], mode="lines", name=p, line=dict(color=PERSON_STYLE[p]["line"], width=2.6)))
-    fig.update_layout(height=420, margin=dict(l=12,r=12,t=15,b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd", xaxis=dict(gridcolor="rgba(255,255,255,.08)"), yaxis=dict(gridcolor="rgba(255,255,255,.08)", tickformat=","), legend=dict(orientation="h", y=1.08))
+    fig.update_layout(height=420, margin=dict(l=12,r=12,t=15,b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd", xaxis=dict(gridcolor="rgba(255,255,255,.08)"), yaxis=dict(gridcolor="rgba(255,255,255,.08)", tickformat=","), legend=dict(orientation="h", y=1.08, font=dict(color="#FFFFFF")))
     return fig
 
 
@@ -909,7 +1094,7 @@ elif page == "設定":
     st.write(f"版本：**{APP_VERSION}**")
     if github_enabled():
         g = github_settings()
-        st.success(f"GitHub 永久保存已啟用：{g['repo']} / {g['branch']} / {g['data_path']}")
+        st.success(f"GitHub 永久保存已啟用：{g['repo']} / {g['branch']} / SQLite：{g['db_path']} / CSV鏡像：{g['data_path']}")
     else:
         st.error("GitHub 永久保存未啟用。")
-    st.caption("此版本沿用既有 data.csv 欄位，不需要搬移或重建歷史資料。")
+    st.caption("v7 正式版以 SQLite 為主資料庫；既有 data.csv 第一次啟動會自動匯入。CSV 仍保留作為相容鏡像與人工備份格式。")
