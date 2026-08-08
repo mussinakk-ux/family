@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_VERSION = "v6.3 Ultimate"
+APP_VERSION = "v6.4 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 CONFIG_FILE = Path("config.json")
@@ -693,18 +693,11 @@ elif page == "新增／修改":
             col = f"{p}{asset}"
             defaults[col] = int(existing.iloc[-1][col]) if has_existing and col in existing.columns else 0
 
-    # 每個日期使用獨立的輸入元件 key。
-    # 這比共用固定 key 更可靠：切換日期時一定會建立/載入該日自己的欄位值，
-    # 不會被前一個日期殘留的 0 或 Streamlit session_state 覆蓋。
-    loaded_marker = f"_edit_loaded_date_v63"
-    if st.session_state.get(loaded_marker) != selected_date_str:
-        for col in DETAIL_COLUMNS:
-            widget_key = f"edit_{selected_date_str}_{col}"
-            st.session_state[widget_key] = int(defaults.get(col, 0))
-        st.session_state[loaded_marker] = selected_date_str
-
+    # 每個日期使用完全獨立的 widget key，並直接把 GitHub data.csv 中該日數值
+    # 當成 number_input 的 value。這樣不依賴 session_state 灌值時機，切換日期一定會帶出資料。
     if has_existing:
         st.success(f"✅ 已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄。下面欄位就是當天已儲存的數值，可直接補登或修改。")
+        st.caption("已讀取資料：" + "｜".join([f"{p} {money(sum(defaults.get(f'{p}{a}', 0) for a in ASSET_TYPES))}" for p in PEOPLE]))
     else:
         st.caption(f"{selected_date.strftime('%Y/%m/%d')} 尚無紀錄，將建立新的一筆。")
 
@@ -719,6 +712,7 @@ elif page == "新增／修改":
                 with cols[i]:
                     inputs[col] = st.number_input(
                         f"{p}｜{asset}金額",
+                        value=int(defaults.get(col, 0)),
                         step=1,
                         format="%d",
                         key=widget_key,
