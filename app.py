@@ -1,34 +1,59 @@
 from __future__ import annotations
 
+import base64
+import calendar
+import html
+import json
+import os
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
-import calendar
-import json
-import base64
-import os
-
-import requests
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import requests
 import streamlit as st
 
-APP_VERSION = "v6.4 Ultimate"
+APP_VERSION = "v7.0 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
+TAIPEI = ZoneInfo("Asia/Taipei")
+PEOPLE = ["憲", "萱", "傑", "文"]
+ASSET_TYPES = ["基金", "美股", "台股"]
+DETAIL_COLUMNS = [f"{p}{a}" for p in PEOPLE for a in ASSET_TYPES]
+COLUMNS = ["日期", *DETAIL_COLUMNS]
+DATA_FILE = Path("data.csv")
 CONFIG_FILE = Path("config.json")
 
+PERSON_STYLE = {
+    "憲": {"line": "#2f75b5", "soft": "#eef5ff", "dark": "#174a7e", "icon": "👤"},
+    "萱": {"line": "#d54d73", "soft": "#fff0f4", "dark": "#8f2344", "icon": "👤"},
+    "傑": {"line": "#5f8f44", "soft": "#f1f7ea", "dark": "#365a25", "icon": "👤"},
+    "文": {"line": "#c48228", "soft": "#fff6e8", "dark": "#805114", "icon": "👤"},
+}
 
-# ===== GitHub 永久保存設定 =====
-# 在 Streamlit Cloud → Settings → Secrets 貼上：
-# GITHUB_TOKEN = "你的 GitHub token"
-# GITHUB_REPO = "帳號/Repository名稱"  例如 "mussinakk/family"
-# GITHUB_BRANCH = "main"
-# GITHUB_DATA_PATH = "data.csv"
-# GITHUB_CONFIG_PATH = "config.json"
+THEMES = {
+    "黑金尊爵版": {
+        "bg": "#070707", "panel": "#11110f", "panel2": "#17150f", "gold": "#e4b843",
+        "gold2": "#8f6b1f", "text": "#f7f0dd", "muted": "#b9ab83", "good": "#7bd85b",
+        "bad": "#ff6b6b", "border": "rgba(228,184,67,.70)"
+    },
+    "招財綠金版": {
+        "bg": "#04130e", "panel": "#0b2118", "panel2": "#103123", "gold": "#e2bd58",
+        "gold2": "#1d7550", "text": "#fff7d8", "muted": "#cabd8c", "good": "#73e7a8",
+        "bad": "#ff7777", "border": "rgba(226,189,88,.72)"
+    },
+}
+
+# ---------- 基本工具 ----------
+def now_tw() -> datetime:
+    return datetime.now(TAIPEI)
+
+
 def _secret(name: str, default: str = "") -> str:
-    """同時支援 Streamlit secrets 與環境變數。"""
     try:
         if name in st.secrets:
             return str(st.secrets.get(name, default)).strip()
@@ -38,18 +63,9 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def github_settings() -> dict:
-    """讀取 GitHub 同步設定。
-
-    支援兩種 Streamlit Secrets 寫法：
-    A. GITHUB_OWNER="mussinakk-ux" + GITHUB_REPO="family"
-    B. GITHUB_REPO="mussinakk-ux/family"
-
-    這裡特別處理 GITHUB_REPO="family" 的情況，避免被當成完整 repo 路徑而失敗。
-    """
     owner = _secret("GITHUB_OWNER")
     repo_value = _secret("GITHUB_REPO")
     repo_name = _secret("GITHUB_REPO_NAME")
-
     if repo_value and "/" in repo_value:
         repo_full = repo_value
     elif owner and repo_value:
@@ -58,13 +74,13 @@ def github_settings() -> dict:
         repo_full = f"{owner}/{repo_name}"
     else:
         repo_full = repo_value
-
     return {
         "token": _secret("GITHUB_TOKEN"),
         "repo": repo_full,
         "branch": _secret("GITHUB_BRANCH", "main") or "main",
         "data_path": _secret("GITHUB_DATA_PATH", "data.csv") or "data.csv",
         "config_path": _secret("GITHUB_CONFIG_PATH", "config.json") or "config.json",
+        "backup_dir": _secret("GITHUB_BACKUP_DIR", "backup") or "backup",
     }
 
 
@@ -83,127 +99,172 @@ def github_headers() -> dict:
 
 
 def github_get_file(path: str) -> tuple[bytes | None, str | None, str | None]:
-    """回傳：(content_bytes, sha, error)。404 代表檔案不存在。"""
     if not github_enabled():
         return None, None, "尚未設定 GitHub 同步"
     g = github_settings()
-    url = f"https://api.github.com/repos/{g['repo']}/contents/{path}"
+    url = f"https://api.github.com/repos/{g['repo']}/contents/{quote(path, safe='/')}"
     try:
         r = requests.get(url, headers=github_headers(), params={"ref": g["branch"]}, timeout=20)
         if r.status_code == 404:
             return None, None, None
         if r.status_code >= 400:
-            return None, None, f"GitHub 讀取失敗：{r.status_code} {r.text[:300]}"
-        data = r.json()
-        content = base64.b64decode(data.get("content", "")) if data.get("content") else b""
-        return content, data.get("sha"), None
-    except Exception as e:
-        return None, None, f"GitHub 讀取錯誤：{e}"
+            return None, None, f"GitHub 讀取失敗：{r.status_code} {r.text[:280]}"
+        payload = r.json()
+        content = base64.b64decode(payload.get("content", "")) if payload.get("content") else b""
+        return content, payload.get("sha"), None
+    except Exception as exc:
+        return None, None, f"GitHub 讀取錯誤：{exc}"
 
 
 def github_put_file(path: str, content: bytes, message: str, retry: bool = True) -> tuple[bool, str]:
-    """新增或覆蓋 GitHub 檔案，成功後代表資料已永久寫入 GitHub。"""
     if not github_enabled():
-        return False, "尚未設定 GitHub 同步，為避免資料遺失，本版本不允許只存到 Streamlit 暫存空間。"
+        return False, "尚未設定 GitHub Secrets；為避免資料只存在暫存空間，本版本拒絕儲存。"
     g = github_settings()
     _, sha, err = github_get_file(path)
     if err:
         return False, err
-    url = f"https://api.github.com/repos/{g['repo']}/contents/{path}"
-    payload = {
+    url = f"https://api.github.com/repos/{g['repo']}/contents/{quote(path, safe='/')}"
+    body = {
         "message": message,
         "content": base64.b64encode(content).decode("ascii"),
         "branch": g["branch"],
     }
     if sha:
-        payload["sha"] = sha
+        body["sha"] = sha
     try:
-        r = requests.put(url, headers=github_headers(), json=payload, timeout=30)
+        r = requests.put(url, headers=github_headers(), json=body, timeout=30)
         if r.status_code in (409, 422) and retry:
-            # GitHub 版本衝突時重新取得最新 sha 後再存一次。
-            return github_put_file(path, content, message + " retry", retry=False)
+            return github_put_file(path, content, message + " (retry)", retry=False)
         if r.status_code >= 400:
-            return False, f"GitHub 儲存失敗：{r.status_code} {r.text[:500]}"
-        return True, "已同步到 GitHub，資料永久保存。"
-    except Exception as e:
-        return False, f"GitHub 儲存錯誤：{e}"
+            return False, f"GitHub 儲存失敗：{r.status_code} {r.text[:420]}"
+        return True, "已同步 GitHub 並永久保存"
+    except Exception as exc:
+        return False, f"GitHub 儲存錯誤：{exc}"
 
 
-def github_backup_data(content: bytes) -> None:
-    """額外建立備份 CSV。失敗不阻擋主要儲存。"""
+def github_list_backups() -> tuple[list[dict], str | None]:
     if not github_enabled():
-        return
-    enable = _secret("GITHUB_ENABLE_BACKUP", "true").lower()
-    if enable not in ("1", "true", "yes", "y", "on"):
-        return
-    backup_dir = _secret("GITHUB_BACKUP_DIR", "backup") or "backup"
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    github_put_file(f"{backup_dir}/data_{ts}.csv", content, f"Backup family asset data {ts}", retry=False)
+        return [], "尚未設定 GitHub 同步"
+    g = github_settings()
+    url = f"https://api.github.com/repos/{g['repo']}/contents/{quote(g['backup_dir'], safe='/')}"
+    try:
+        r = requests.get(url, headers=github_headers(), params={"ref": g["branch"]}, timeout=20)
+        if r.status_code == 404:
+            return [], None
+        if r.status_code >= 400:
+            return [], f"備份清單讀取失敗：{r.status_code}"
+        rows = [x for x in r.json() if x.get("type") == "file" and x.get("name", "").lower().endswith(".csv")]
+        rows.sort(key=lambda x: x.get("name", ""), reverse=True)
+        return rows, None
+    except Exception as exc:
+        return [], f"備份清單讀取錯誤：{exc}"
 
+
+def make_backup(csv_bytes: bytes, reason: str = "save") -> tuple[bool, str]:
+    if not github_enabled():
+        return False, "尚未設定 GitHub 同步"
+    g = github_settings()
+    stamp = now_tw().strftime("%Y%m%d_%H%M%S")
+    path = f"{g['backup_dir']}/data_{stamp}_{reason}.csv"
+    return github_put_file(path, csv_bytes, f"Backup family asset data {stamp} ({reason})", retry=False)
 
 
 def load_config() -> dict:
-    default = {"app_name": DEFAULT_APP_TITLE, "app_icon": DEFAULT_APP_ICON, "theme": "黑金尊爵版"}
+    cfg = {"app_name": DEFAULT_APP_TITLE, "app_icon": DEFAULT_APP_ICON, "theme": "黑金尊爵版"}
     if github_enabled():
         content, _, err = github_get_file(github_settings()["config_path"])
         if content and not err:
             try:
-                data = json.loads(content.decode("utf-8"))
-                if isinstance(data, dict):
-                    default.update({k: v for k, v in data.items() if v is not None})
-                    CONFIG_FILE.write_bytes(content)
-                    return default
+                cfg.update(json.loads(content.decode("utf-8")))
+                CONFIG_FILE.write_bytes(content)
+                return cfg
             except Exception:
                 pass
     if CONFIG_FILE.exists():
         try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                default.update({k: v for k, v in data.items() if v is not None})
+            cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
         except Exception:
             pass
-    return default
+    return cfg
 
 
-def save_config(config: dict) -> None:
-    text = json.dumps(config, ensure_ascii=False, indent=2)
-    CONFIG_FILE.write_text(text, encoding="utf-8")
+def save_config(cfg: dict) -> tuple[bool, str]:
+    raw = json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+    CONFIG_FILE.write_bytes(raw)
+    if not github_enabled():
+        return False, "設定只寫入暫存空間；請先設定 GitHub Secrets。"
+    return github_put_file(github_settings()["config_path"], raw, "Update family asset app config")
+
+
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=COLUMNS)
+    df = df.copy()
+    if "日期" not in df.columns:
+        raise ValueError("匯入檔缺少『日期』欄位")
+
+    # 相容最早期只有四人總數值的資料：視為基金。
+    for p in PEOPLE:
+        fund = f"{p}基金"
+        if fund not in df.columns:
+            df[fund] = df[p] if p in df.columns else 0
+        for a in ("美股", "台股"):
+            col = f"{p}{a}"
+            if col not in df.columns:
+                df[col] = 0
+
+    df = df[COLUMNS].copy()
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    df = df.dropna(subset=["日期"])
+    for col in DETAIL_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).round().astype(int)
+    if df.empty:
+        return pd.DataFrame(columns=COLUMNS)
+    df = df.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
+    df["日期"] = df["日期"].dt.date
+    return df
+
+
+def load_data() -> pd.DataFrame:
     if github_enabled():
-        ok, msg = github_put_file(github_settings()["config_path"], text.encode("utf-8"), "Update app config")
-        if not ok:
-            st.warning(msg)
+        content, _, err = github_get_file(github_settings()["data_path"])
+        if content and not err:
+            DATA_FILE.write_bytes(content)
+            try:
+                return normalize_df(pd.read_csv(BytesIO(content), encoding="utf-8-sig"))
+            except UnicodeDecodeError:
+                return normalize_df(pd.read_csv(BytesIO(content)))
+    if DATA_FILE.exists() and DATA_FILE.stat().st_size:
+        return normalize_df(pd.read_csv(DATA_FILE, encoding="utf-8-sig"))
+    return pd.DataFrame(columns=COLUMNS)
 
 
-APP_CONFIG = load_config()
-APP_TITLE = str(APP_CONFIG.get("app_name") or DEFAULT_APP_TITLE)
-APP_ICON = str(APP_CONFIG.get("app_icon") or DEFAULT_APP_ICON)
-PEOPLE = ["憲", "萱", "傑", "文"]
-ASSET_TYPES = ["基金", "美股", "台股"]
-DETAIL_COLUMNS = [f"{p}{asset}" for p in PEOPLE for asset in ASSET_TYPES]
-PERSON_COLORS = {"憲": "#00C853", "萱": "#FFD700", "傑": "#42A5F5", "文": "#BA68C8"}
-TOTAL_COLOR = "#FFD700"
-COLUMNS = ["日期", *DETAIL_COLUMNS]
-DATA_FILE = Path("data.csv")
+def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    out = normalize_df(df)
+    if not out.empty:
+        out = out.copy()
+        out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
+    # utf-8-sig 是 Excel 中文相容格式。
+    return out.to_csv(index=False).encode("utf-8-sig")
 
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=APP_ICON,
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
 
-THEMES = {
-    "黑金尊爵版": {
-        "bg1": "#050505", "bg2": "#17120a", "card": "rgba(26, 22, 15, .94)",
-        "border": "#c9a646", "text": "#fff3c4", "muted": "#b9a56b", "accent": "#f6d365",
-        "accent2": "#8f6a19", "good": "#40e28a", "bad": "#ff6666", "input": "#111111"
-    },
-    "招財綠金版": {
-        "bg1": "#021712", "bg2": "#063626", "card": "rgba(4, 45, 32, .95)",
-        "border": "#d8b85a", "text": "#fff7d1", "muted": "#c9ba78", "accent": "#ffd86b",
-        "accent2": "#0d7a4d", "good": "#62f0a5", "bad": "#ff6d6d", "input": "#05261d"
-    },
-}
+def save_data(df: pd.DataFrame, reason: str = "save") -> tuple[bool, str]:
+    if not github_enabled():
+        return False, "GitHub 永久保存未啟用，為避免再次遺失資料，本版本不允許儲存。"
+    clean = normalize_df(df)
+    raw = dataframe_to_csv_bytes(clean)
+    ok, msg = github_put_file(
+        github_settings()["data_path"],
+        raw,
+        f"Update family asset data {now_tw().strftime('%Y-%m-%d %H:%M:%S')}",
+    )
+    if not ok:
+        return False, msg
+    DATA_FILE.write_bytes(raw)
+    backup_ok, backup_msg = make_backup(raw, reason)
+    if backup_ok:
+        return True, f"{msg}；已建立自動備份"
+    return True, f"{msg}；主要資料已保存（備份提示：{backup_msg}）"
 
 
 def money(v) -> str:
@@ -216,18 +277,15 @@ def money(v) -> str:
 def signed(v) -> str:
     try:
         n = int(round(float(v)))
-        return ("+" if n >= 0 else "") + f"{abs(n):,}" if n >= 0 else f"-{abs(n):,}"
     except Exception:
-        return "+0"
+        n = 0
+    return f"+{n:,}" if n >= 0 else f"-{abs(n):,}"
 
 
 def pct(change, base) -> float:
     try:
-        base = float(base)
-        change = float(change)
-        if base == 0:
-            return 0.0
-        return change / base * 100
+        b = float(base)
+        return (float(change) / b * 100) if b else 0.0
     except Exception:
         return 0.0
 
@@ -235,631 +293,604 @@ def pct(change, base) -> float:
 def pct_text(v) -> str:
     try:
         n = float(v)
-        return ("+" if n >= 0 else "") + f"{n:.2f}%"
     except Exception:
-        return "+0.00%"
+        n = 0.0
+    return f"{n:+.2f}%"
 
 
-def load_data() -> pd.DataFrame:
-    """讀取 data.csv。
-    v5.0 起會優先從 GitHub 讀取，確保 Streamlit 重啟後仍讀到最新永久資料。
-    舊版欄位「憲、萱、傑、文」會自動視為「基金」金額；新版另有台股、美股。
-    統計時會把每個人的基金＋台股＋美股加總成個人資產。
-    """
-    if github_enabled():
-        content, _, err = github_get_file(github_settings()["data_path"])
-        if content and not err:
-            DATA_FILE.write_bytes(content)
-            df = pd.read_csv(BytesIO(content), encoding="utf-8-sig")
-        elif DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
-            df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
-        else:
-            df = pd.DataFrame(columns=COLUMNS)
-    elif DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
-        df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
-    else:
-        df = pd.DataFrame(columns=COLUMNS)
+def html_change(v) -> str:
+    cls = "gain" if float(v) >= 0 else "loss"
+    return f'<span class="{cls}">{signed(v)}</span>'
 
-    if "日期" not in df.columns:
-        df["日期"] = ""
 
-    # 舊版資料：日期、憲、萱、傑、文。自動搬到「基金」欄位。
-    for p in PEOPLE:
-        fund_col = f"{p}基金"
-        if fund_col not in df.columns:
-            if p in df.columns:
-                df[fund_col] = df[p]
-            else:
-                df[fund_col] = 0
-        for asset in ["台股", "美股"]:
-            col = f"{p}{asset}"
-            if col not in df.columns:
-                df[col] = 0
+def person_total_series(df: pd.DataFrame, person: str) -> pd.Series:
+    cols = [f"{person}{a}" for a in ASSET_TYPES]
+    return df[cols].sum(axis=1)
 
-    df = df[COLUMNS].copy()
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-    df = df.dropna(subset=["日期"])
-    for col in DETAIL_COLUMNS:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-    if not df.empty:
-        df = df.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
-        df["日期"] = df["日期"].dt.date
-    return df
-
-def save_data(df: pd.DataFrame) -> tuple[bool, str]:
-    """永久保存資料。
-
-    v5.0 正式版：沒有 GitHub Secrets 時，直接拒絕儲存，
-    避免資料只存在 Streamlit 暫存空間而再次消失。
-    """
-    if not github_enabled():
-        return False, "尚未設定 GitHub Secrets，為避免資料再次消失，本版本不允許儲存到 Streamlit 暫存空間。請先設定 GITHUB_TOKEN、GITHUB_REPO、GITHUB_BRANCH。"
-
-    out = df[COLUMNS].copy() if not df.empty else pd.DataFrame(columns=COLUMNS)
-    if not out.empty:
-        out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
-    csv_text = out.to_csv(index=False, encoding="utf-8-sig")
-    csv_bytes = csv_text.encode("utf-8-sig")
-
-    ok, msg = github_put_file(
-        github_settings()["data_path"],
-        csv_bytes,
-        f"Update family asset data {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    if not ok:
-        return False, msg
-
-    # GitHub 寫入成功後才更新本機快取。
-    DATA_FILE.write_bytes(csv_bytes)
-    github_backup_data(csv_bytes)
-    return True, "已成功同步到 GitHub data.csv，並建立備份；資料已永久保存。"
 
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if out.empty:
-        return out
+    if df.empty:
+        cols = [*COLUMNS, *[f"{p}總資產" for p in PEOPLE], "總資產", "每日增減", "日期_dt", "月份", "年份"]
+        return pd.DataFrame(columns=cols)
+    out = normalize_df(df).copy()
+    for p in PEOPLE:
+        out[f"{p}總資產"] = person_total_series(out, p)
+    out["總資產"] = out[[f"{p}總資產" for p in PEOPLE]].sum(axis=1)
+    out["每日增減"] = out["總資產"].diff().fillna(0).round().astype(int)
+    for p in PEOPLE:
+        out[f"{p}每日增減"] = out[f"{p}總資產"].diff().fillna(0).round().astype(int)
     out["日期_dt"] = pd.to_datetime(out["日期"])
-    # 每個人的總資產＝基金＋台股＋美股
-    for p in PEOPLE:
-        out[p] = out[[f"{p}{asset}" for asset in ASSET_TYPES]].sum(axis=1)
-    out["總資產"] = out[PEOPLE].sum(axis=1)
-    out["每日增減"] = out["總資產"].diff().fillna(0).astype(int)
-    for p in PEOPLE:
-        out[f"{p}增減"] = out[p].diff().fillna(0).astype(int)
     out["月份"] = out["日期_dt"].dt.strftime("%Y-%m")
-    out["年度"] = out["日期_dt"].dt.year.astype(str)
+    out["年份"] = out["日期_dt"].dt.year.astype(int)
     return out
 
-def current_period_gain(edf: pd.DataFrame, period: str) -> int:
+
+def previous_close(edf: pd.DataFrame, start: date, value_col: str) -> float | None:
+    prior = edf[edf["日期"] < start]
+    if prior.empty:
+        return None
+    return float(prior.iloc[-1][value_col])
+
+
+def period_stats(edf: pd.DataFrame, value_col: str, start: date, end: date) -> dict:
+    part = edf[(edf["日期"] >= start) & (edf["日期"] <= end)]
+    if part.empty:
+        return {"start": 0, "end": 0, "change": 0, "growth": 0.0}
+    end_value = float(part.iloc[-1][value_col])
+    base = previous_close(edf, start, value_col)
+    if base is None:
+        base = float(part.iloc[0][value_col])
+    change = end_value - base
+    return {"start": base, "end": end_value, "change": change, "growth": pct(change, base)}
+
+
+def current_stats(edf: pd.DataFrame, value_col: str) -> dict:
     if edf.empty:
-        return 0
+        return {"current": 0, "daily": 0, "daily_pct": 0, "month": 0, "month_pct": 0, "year": 0, "year_pct": 0, "history": 0, "history_pct": 0}
     latest = edf.iloc[-1]
-    if period == "month":
-        sub = edf[edf["月份"] == latest["月份"]]
-    else:
-        sub = edf[edf["年度"] == latest["年度"]]
-    if len(sub) <= 1:
-        return 0
-    return int(sub.iloc[-1]["總資產"] - sub.iloc[0]["總資產"])
+    current = float(latest[value_col])
+    prev = float(edf.iloc[-2][value_col]) if len(edf) > 1 else current
+    daily = current - prev
+    latest_date: date = latest["日期"]
+    month_start = date(latest_date.year, latest_date.month, 1)
+    year_start = date(latest_date.year, 1, 1)
+    month = period_stats(edf, value_col, month_start, latest_date)
+    year = period_stats(edf, value_col, year_start, latest_date)
+    first = float(edf.iloc[0][value_col])
+    hist = current - first
+    return {
+        "current": current,
+        "daily": daily, "daily_pct": pct(daily, prev),
+        "month": month["change"], "month_pct": month["growth"],
+        "year": year["change"], "year_pct": year["growth"],
+        "history": hist, "history_pct": pct(hist, first),
+    }
 
 
-
-def all_history_gain(edf: pd.DataFrame) -> int:
-    """從第一筆紀錄開始，累計所有「與前一天相比」的增減。
-    第一筆沒有前一天，視為 0；結果等同於最新總資產 - 第一筆總資產。
-    """
-    if edf.empty or len(edf) <= 1:
-        return 0
-    return int(pd.to_numeric(edf["每日增減"], errors="coerce").fillna(0).sum())
-
-
-def person_history_gain(edf: pd.DataFrame, person: str) -> int:
-    """每個人從第一筆紀錄開始，逐日累計與前一天相比的總變化。"""
-    col = f"{person}增減"
-    if edf.empty or len(edf) <= 1 or col not in edf.columns:
-        return 0
-    return int(pd.to_numeric(edf[col], errors="coerce").fillna(0).sum())
-
-
-def annual_total_changes(edf: pd.DataFrame) -> pd.DataFrame:
-    """每年度總資產增減表。"""
+def monthly_report(edf: pd.DataFrame) -> pd.DataFrame:
     if edf.empty:
-        return pd.DataFrame(columns=["年度", "年初總資產", "年末總資產", "年增減"])
-    year = edf.groupby("年度").agg(年初總資產=("總資產", "first"), 年末總資產=("總資產", "last"))
-    year["年增減"] = year["年末總資產"] - year["年初總資產"]
-    year["年成長率"] = (year["年增減"] / year["年初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
-    return year.reset_index()
+        return pd.DataFrame(columns=["月份", "月末總資產", "增減", "成長率"])
+    rows = []
+    months = sorted(edf["月份"].unique())
+    for ym in months:
+        y, m = map(int, ym.split("-"))
+        start = date(y, m, 1)
+        last_day = calendar.monthrange(y, m)[1]
+        end = date(y, m, last_day)
+        s = period_stats(edf, "總資產", start, end)
+        rows.append({"月份": ym, "月末總資產": int(s["end"]), "增減": int(s["change"]), "成長率": s["growth"]})
+    return pd.DataFrame(rows)
 
-def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    output = BytesIO()
+
+def yearly_report(edf: pd.DataFrame) -> pd.DataFrame:
+    if edf.empty:
+        return pd.DataFrame(columns=["年度", "年末總資產", "增減", "成長率"])
+    rows = []
+    for y in sorted(edf["年份"].unique()):
+        start, end = date(int(y), 1, 1), date(int(y), 12, 31)
+        s = period_stats(edf, "總資產", start, end)
+        rows.append({"年度": int(y), "年末總資產": int(s["end"]), "增減": int(s["change"]), "成長率": s["growth"]})
+    return pd.DataFrame(rows)
+
+
+def excel_bytes(df: pd.DataFrame) -> bytes:
     edf = enrich(df)
-    export_df = edf[["日期", *DETAIL_COLUMNS, *PEOPLE, "總資產", "每日增減"]].copy() if not edf.empty else pd.DataFrame(columns=["日期", *DETAIL_COLUMNS, *PEOPLE, "總資產", "每日增減"])
-    export_df["日期"] = pd.to_datetime(export_df["日期"], errors="coerce").dt.strftime("%Y-%m-%d") if not export_df.empty else export_df.get("日期", pd.Series(dtype=str))
+    daily = edf.copy()
+    if not daily.empty:
+        daily["日期"] = daily["日期"].astype(str)
+        daily = daily[["日期", *DETAIL_COLUMNS, *[f"{p}總資產" for p in PEOPLE], "總資產", "每日增減"]]
+    month = monthly_report(edf)
+    year = yearly_report(edf)
+    output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        export_df.to_excel(writer, index=False, sheet_name="每日紀錄")
-        if not edf.empty:
-            month = edf.groupby("月份").agg(月初總資產=("總資產", "first"), 月末總資產=("總資產", "last"))
-            month["月增減"] = month["月末總資產"] - month["月初總資產"]
-            month["月成長率"] = (month["月增減"] / month["月初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
-            year = edf.groupby("年度").agg(年初總資產=("總資產", "first"), 年末總資產=("總資產", "last"))
-            year["年增減"] = year["年末總資產"] - year["年初總資產"]
-            year["年成長率"] = (year["年增減"] / year["年初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
-            month.reset_index().to_excel(writer, index=False, sheet_name="月報表")
-            year.reset_index().to_excel(writer, index=False, sheet_name="年報表")
+        daily.to_excel(writer, index=False, sheet_name="每日紀錄")
+        month.to_excel(writer, index=False, sheet_name="月報表")
+        year.to_excel(writer, index=False, sheet_name="年報表")
     return output.getvalue()
 
 
+def parse_import(uploaded) -> pd.DataFrame:
+    name = uploaded.name.lower()
+    raw = uploaded.getvalue()
+    if name.endswith(".csv"):
+        try:
+            df = pd.read_csv(BytesIO(raw), encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            df = pd.read_csv(BytesIO(raw))
+    elif name.endswith(".xlsx") or name.endswith(".xls"):
+        df = pd.read_excel(BytesIO(raw))
+    else:
+        raise ValueError("只支援 CSV 或 Excel (.xlsx) 檔")
+    # 若匯入的是本 App 匯出的每日紀錄，忽略計算欄位即可。
+    return normalize_df(df)
+
+
+def upsert_record(df: pd.DataFrame, record_date: date, values: dict[str, int]) -> pd.DataFrame:
+    current = normalize_df(df)
+    new = pd.DataFrame([{"日期": record_date, **values}])
+    return normalize_df(pd.concat([current, new], ignore_index=True))
+
+
+def merge_import(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    return normalize_df(pd.concat([normalize_df(existing), normalize_df(incoming)], ignore_index=True))
+
+# ---------- CSS / UI ----------
 def inject_css(theme_name: str) -> None:
     t = THEMES[theme_name]
     st.markdown(f"""
     <style>
-    .stApp {{
-        background: radial-gradient(circle at top left, {t['accent2']} 0, {t['bg2']} 28%, {t['bg1']} 100%);
-        color: {t['text']};
-    }}
-    section[data-testid="stSidebar"] {{ background: rgba(0,0,0,.30); }}
-    section[data-testid="stSidebar"], section[data-testid="stSidebar"] * {{ color: #FFFFFF !important; }}
-    section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] span {{ color: #FFFFFF !important; }}
-    section[data-testid="stSidebar"] [role="radiogroup"] label {{ color: #FFFFFF !important; }}
-    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] * {{ color: #FFFFFF !important; }}
-    h1, h2, h3, label, .stMarkdown, .stText, .stCaption {{ color: {t['text']} !important; }}
-    .asset-card {{
-        padding: 18px 18px;
-        border: 1px solid {t['border']};
-        border-radius: 20px;
-        background: linear-gradient(145deg, {t['card']}, rgba(0,0,0,.25));
-        box-shadow: 0 12px 32px rgba(0,0,0,.30);
-        margin-bottom: 14px;
-    }}
-    .asset-label {{ color: {t['muted']}; font-size: 14px; margin-bottom: 8px; }}
-    .asset-value {{ color: {t['accent']}; font-size: 30px; font-weight: 800; line-height: 1.15; }}
-    .asset-small {{ color: {t['text']}; font-size: 18px; font-weight: 700; }}
-    .gain {{ color: {t['good']}; font-weight: 800; }}
-    .loss {{ color: {t['bad']}; font-weight: 800; }}
-    div[data-testid="stMetric"] {{
-        border: 1px solid {t['border']};
-        background: {t['card']};
-        border-radius: 18px;
-        padding: 14px;
-        box-shadow: 0 8px 26px rgba(0,0,0,.28);
-    }}
-    div[data-testid="stMetricValue"] {{ color: {t['accent']}; }}
-    .stButton > button, .stDownloadButton > button {{
-        border-radius: 14px;
-        border: 1px solid {t['border']};
-        background: linear-gradient(135deg, {t['accent']}, {t['accent2']});
-        color: #101010;
-        font-weight: 800;
-        min-height: 44px;
-    }}
-    div[data-testid="stFormSubmitButton"] button {{
-        border-radius: 18px !important;
-        border: 2px solid #FFFFFF !important;
-        background: linear-gradient(135deg, #00E676, #FFD700) !important;
-        color: #000000 !important;
-        font-size: 20px !important;
-        font-weight: 1000 !important;
-        min-height: 58px !important;
-        box-shadow: 0 0 24px rgba(255, 215, 0, .65), 0 0 18px rgba(0, 230, 118, .45) !important;
-    }}
-    div[data-testid="stFormSubmitButton"] button:hover {{
-        transform: translateY(-1px);
-        filter: brightness(1.08);
-    }}
-    .calendar-grid {{ display:grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }}
-    .cal-head {{ text-align:center; color:{t['muted']}; font-weight:700; padding: 4px 0; }}
-    .cal-cell {{
-        min-height: 92px;
-        border:1px solid rgba(216,184,90,.45);
-        border-radius:14px;
-        padding:8px;
-        background:{t['card']};
-        font-size: 13px;
-        overflow:hidden;
-    }}
-    .cal-day {{ color:{t['accent']}; font-weight:800; margin-bottom:6px; }}
-    .cal-empty {{ opacity:.25; }}
-    @media (max-width: 768px) {{
-        .asset-value {{font-size: 24px;}}
-        .calendar-grid {{ gap: 5px; }}
-        .cal-cell {{ min-height: 74px; padding: 6px; font-size: 11px; }}
-    }}
+      .stApp {{ background: {t['bg']}; color:{t['text']}; }}
+      .block-container {{ max-width: 1540px; padding-top: 1.0rem; padding-bottom: 2rem; }}
+      h1,h2,h3,label,p,span,.stCaption,.stMarkdown {{ color:{t['text']}; }}
+      [data-testid="stHeader"] {{ background:rgba(0,0,0,0); }}
+      .app-head {{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:8px;}}
+      .app-title {{font-size:34px;font-weight:900;color:{t['gold']};letter-spacing:.3px;}}
+      .sync-top {{text-align:right;color:{t['muted']};font-size:13px;line-height:1.5;}}
+      .sync-dot {{color:#65d36e;}}
+      .top-nav {{margin:4px 0 12px;}}
+      .stButton>button {{border:1px solid {t['border']};border-radius:10px;background:{t['panel']};color:{t['text']};font-weight:800;min-height:42px;}}
+      .stButton>button:hover {{border-color:{t['gold']};color:{t['gold']};box-shadow:0 0 14px rgba(228,184,67,.25);}}
+      div[data-testid="stFormSubmitButton"] button {{background:linear-gradient(135deg,#00e676,#ffd54f)!important;color:#000!important;border:2px solid #fff!important;font-size:19px!important;font-weight:900!important;min-height:56px!important;}}
+      .family-strip {{display:grid;grid-template-columns:1.35fr repeat(4,1fr);border:1px solid {t['border']};border-radius:16px;overflow:hidden;background:linear-gradient(120deg,{t['panel2']},{t['panel']});margin:6px 0 16px;}}
+      .family-cell {{padding:18px 18px;border-right:1px solid rgba(228,184,67,.35);text-align:center;}}
+      .family-cell:last-child {{border-right:0;}}
+      .family-label {{font-size:15px;color:{t['muted']};font-weight:800;margin-bottom:8px;}}
+      .family-main {{font-size:34px;color:{t['gold']};font-weight:950;letter-spacing:.5px;}}
+      .metric-main {{font-size:24px;font-weight:900;}}
+      .metric-pct {{font-size:15px;font-weight:900;margin-top:4px;}}
+      .gain {{color:{t['good']}!important;font-weight:850;}}
+      .loss {{color:{t['bad']}!important;font-weight:850;}}
+      .person-card {{border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,.65);box-shadow:0 9px 22px rgba(0,0,0,.22);margin-bottom:8px;color:#101010;}}
+      .person-head {{padding:13px 18px;font-size:25px;font-weight:950;display:flex;gap:10px;align-items:center;}}
+      .person-body {{padding:10px 18px 14px;}}
+      .person-body * {{color:#171717!important;}}
+      .person-asset {{font-size:31px;font-weight:950;margin:3px 0 9px;}}
+      .person-row {{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;border-top:1px solid rgba(0,0,0,.11);padding:7px 0;font-size:14px;}}
+      .person-row .v {{text-align:right;font-weight:850;}}
+      .person-row .p {{text-align:right;font-weight:850;color:#24743a!important;}}
+      .panel {{border:1px solid {t['border']};border-radius:16px;background:{t['panel']};padding:14px 16px;margin-bottom:12px;}}
+      .panel-title {{color:{t['gold']};font-size:17px;font-weight:900;margin-bottom:8px;}}
+      .status-grid {{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid {t['border']};border-radius:16px;background:{t['panel']};overflow:hidden;}}
+      .status-item {{padding:15px;border-right:1px solid rgba(228,184,67,.28);min-height:104px;}}
+      .status-item:last-child {{border-right:0;}}
+      .status-title {{color:{t['gold']};font-weight:850;margin-bottom:8px;}}
+      .status-big {{font-size:19px;font-weight:900;}}
+      div[data-testid="stMetric"] {{border:1px solid {t['border']};background:{t['panel']};border-radius:14px;padding:12px;}}
+      div[data-testid="stMetricValue"] {{color:{t['gold']};}}
+      .calendar-grid {{display:grid;grid-template-columns:repeat(7,1fr);gap:7px;}}
+      .cal-head {{text-align:center;color:{t['muted']};font-weight:800;padding:5px;}}
+      .cal-cell {{min-height:94px;border:1px solid rgba(228,184,67,.35);border-radius:12px;padding:7px;background:{t['panel']};font-size:12px;}}
+      .cal-day {{color:{t['gold']};font-weight:900;font-size:14px;margin-bottom:5px;}}
+      .stDownloadButton>button {{width:100%;border:1px solid {t['border']};border-radius:10px;background:{t['panel2']};color:{t['text']};font-weight:850;}}
+      @media (max-width: 850px) {{
+        .app-title {{font-size:26px;}}
+        .family-strip {{grid-template-columns:1fr 1fr;}}
+        .family-cell {{border-bottom:1px solid rgba(228,184,67,.3);}}
+        .family-cell:first-child {{grid-column:1/-1;}}
+        .family-main {{font-size:30px;}}
+        .status-grid {{grid-template-columns:1fr 1fr;}}
+        .status-item {{border-bottom:1px solid rgba(228,184,67,.25);}}
+        .person-asset {{font-size:25px;}}
+        .calendar-grid {{gap:4px;}}
+        .cal-cell {{min-height:72px;padding:5px;font-size:10px;}}
+      }}
     </style>
     """, unsafe_allow_html=True)
 
 
-def card(label: str, value: str, sub: str = "", positive: bool | None = None) -> None:
-    cls = "gain" if positive is True else "loss" if positive is False else "asset-small"
+def family_strip(stats: dict) -> None:
+    items = [
+        ("家庭總資產", money(stats["current"]), None, "family"),
+        ("今日增減", signed(stats["daily"]), pct_text(stats["daily_pct"]), "normal"),
+        ("本月增減", signed(stats["month"]), pct_text(stats["month_pct"]), "normal"),
+        ("本年增減", signed(stats["year"]), pct_text(stats["year_pct"]), "normal"),
+        ("歷年增減", signed(stats["history"]), pct_text(stats["history_pct"]), "normal"),
+    ]
+    cells = []
+    for label, val, ptxt, kind in items:
+        if kind == "family":
+            cells.append(f'<div class="family-cell"><div class="family-label">{label}</div><div class="family-main">$ {val}</div></div>')
+        else:
+            cls = "gain" if not val.startswith("-") else "loss"
+            cells.append(f'<div class="family-cell"><div class="family-label">{label}</div><div class="metric-main {cls}">{val}</div><div class="metric-pct {cls}">{ptxt}</div></div>')
+    st.markdown('<div class="family-strip">' + ''.join(cells) + '</div>', unsafe_allow_html=True)
+
+
+def person_card(person: str, s: dict) -> None:
+    sty = PERSON_STYLE[person]
+    rows = []
+    for label, key, pkey in [
+        ("今日增減", "daily", "daily_pct"),
+        ("本月增減", "month", "month_pct"),
+        ("本年增減", "year", "year_pct"),
+        ("歷年增減", "history", "history_pct"),
+    ]:
+        cls = "gain" if s[key] >= 0 else "loss"
+        rows.append(f'<div class="person-row"><div>{label}</div><div class="v {cls}">{signed(s[key])}</div><div class="p">{pct_text(s[pkey])}</div></div>')
     st.markdown(f"""
-    <div class="asset-card">
-        <div class="asset-label">{label}</div>
-        <div class="asset-value">{value}</div>
-        {f'<div class="{cls}">{sub}</div>' if sub else ''}
+    <div class="person-card" style="background:{sty['soft']};border-color:{sty['line']}55;">
+      <div class="person-head" style="color:{sty['dark']};border-bottom:1px solid {sty['line']}44;">
+        <span style="width:36px;height:36px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:{sty['line']};color:white!important;font-size:19px;">{sty['icon']}</span>{person}
+      </div>
+      <div class="person-body">
+        <div style="font-size:13px;">總資產</div>
+        <div class="person-asset">$ {money(s['current'])}</div>
+        {''.join(rows)}
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
 
-def person_daily_stats(edf: pd.DataFrame, person: str) -> dict[str, int | float]:
-    """回傳每個人每日變化的歷史統計。"""
-    col = f"{person}增減"
-    if edf.empty or col not in edf.columns:
-        return {"today": 0, "history_gain": 0, "avg": 0, "max_up": 0, "max_down": 0, "positive_days": 0, "total_days": 0}
-    changes = pd.to_numeric(edf[col], errors="coerce").fillna(0)
-    # 第一筆通常是 0，統計時排除第一筆，較接近真正每日變化
-    if len(changes) > 1:
-        history = changes.iloc[1:]
-    else:
-        history = changes
-    return {
-        "today": int(changes.iloc[-1]) if len(changes) else 0,
-        "history_gain": person_history_gain(edf, person),
-        "avg": float(history.mean()) if len(history) else 0,
-        "max_up": int(history.max()) if len(history) else 0,
-        "max_down": int(history.min()) if len(history) else 0,
-        "positive_days": int((history > 0).sum()) if len(history) else 0,
-        "total_days": int(len(history)),
-    }
+def plot_asset_distribution(edf: pd.DataFrame):
+    if edf.empty:
+        return None
+    last = edf.iloc[-1]
+    vals = {a: sum(int(last[f"{p}{a}"]) for p in PEOPLE) for a in ASSET_TYPES}
+    dfp = pd.DataFrame({"類別": list(vals.keys()), "金額": list(vals.values())})
+    fig = px.pie(dfp, names="類別", values="金額", hole=.58, color="類別",
+                 color_discrete_map={"基金":"#d5547c","美股":"#5e934e","台股":"#3d83c5"})
+    fig.update_traces(textposition="outside", textinfo="percent+label", hovertemplate="%{label}<br>%{value:,.0f}<br>%{percent}<extra></extra>")
+    fig.update_layout(height=300, margin=dict(l=8,r=8,t=8,b=8), showlegend=True, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd")
+    return fig
 
 
-def person_card(label: str, value: str, stats: dict[str, int | float]) -> None:
-    today = int(stats.get("today", 0))
-    history_gain = int(stats.get("history_gain", 0))
-    avg = int(round(float(stats.get("avg", 0))))
-    max_up = int(stats.get("max_up", 0))
-    max_down = int(stats.get("max_down", 0))
-    positive_days = int(stats.get("positive_days", 0))
-    total_days = int(stats.get("total_days", 0))
-    today_cls = "gain" if today >= 0 else "loss"
-    st.markdown(f"""
-    <div class="asset-card">
-        <div class="asset-label">{label}｜每日變化歷史統計</div>
-        <div class="asset-value">{value}</div>
-        <div class="{today_cls}">今日變化 {signed(today)}</div>
-        <div class="asset-small" style="font-size:14px; line-height:1.65; margin-top:8px;">
-            歷年累計增減：{signed(history_gain)}<br>
-            平均日變化：{signed(avg)}<br>
-            最大增加：{signed(max_up)}<br>
-            最大減少：{signed(max_down)}<br>
-            上升天數：{positive_days}/{total_days}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+def plot_total_trend(edf: pd.DataFrame, months: int | None = 12):
+    if edf.empty:
+        return None
+    d = edf.copy()
+    if months:
+        latest = d["日期_dt"].max()
+        cutoff = latest - pd.DateOffset(months=months)
+        d = d[d["日期_dt"] >= cutoff]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=d["日期_dt"], y=d["總資產"], mode="lines+markers", name="家庭總資產", line=dict(color="#e4b843", width=3), marker=dict(size=5)))
+    fig.update_layout(height=300, margin=dict(l=12,r=12,t=10,b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd", xaxis=dict(gridcolor="rgba(255,255,255,.08)"), yaxis=dict(gridcolor="rgba(255,255,255,.08)", tickformat=","), showlegend=False)
+    return fig
 
 
-def upsert_record(df: pd.DataFrame, record_date: date, values: dict[str, int]) -> pd.DataFrame:
-    new = pd.DataFrame([{ "日期": record_date, **values }])
-    out = pd.concat([df, new], ignore_index=True)
-    out = out.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
-    return out[COLUMNS]
+def plot_people(edf: pd.DataFrame, months: int | None = 12):
+    if edf.empty:
+        return None
+    d = edf.copy()
+    if months:
+        latest = d["日期_dt"].max()
+        d = d[d["日期_dt"] >= latest - pd.DateOffset(months=months)]
+    fig = go.Figure()
+    for p in PEOPLE:
+        fig.add_trace(go.Scatter(x=d["日期_dt"], y=d[f"{p}總資產"], mode="lines", name=p, line=dict(color=PERSON_STYLE[p]["line"], width=2.6)))
+    fig.update_layout(height=420, margin=dict(l=12,r=12,t=15,b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd", xaxis=dict(gridcolor="rgba(255,255,255,.08)"), yaxis=dict(gridcolor="rgba(255,255,255,.08)", tickformat=","), legend=dict(orientation="h", y=1.08))
+    return fig
+
 
 def render_calendar(edf: pd.DataFrame) -> None:
     if edf.empty:
         st.info("尚無資料可以顯示月曆。")
         return
     months = sorted(edf["月份"].unique().tolist(), reverse=True)
-    selected_month = st.selectbox("選擇月份", months, index=0)
-    y, m = map(int, selected_month.split("-"))
-    month_df = edf[edf["月份"] == selected_month].copy()
-
-    # 依照月份選單即時顯示該月統計：月初、月末、當月增減與成長率
-    month_start = int(month_df.iloc[0]["總資產"]) if not month_df.empty else 0
-    month_end = int(month_df.iloc[-1]["總資產"]) if not month_df.empty else 0
-    month_change = month_end - month_start
-    month_growth = pct(month_change, month_start)
+    selected = st.selectbox("選擇月份", months, key="calendar_month")
+    y, m = map(int, selected.split("-"))
+    month_df = edf[edf["月份"] == selected]
+    month_end_date = date(y, m, calendar.monthrange(y, m)[1])
+    s = period_stats(edf, "總資產", date(y,m,1), month_end_date)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("月初總資產", money(month_start))
-    c2.metric("月末總資產", money(month_end))
-    c3.metric("當月增減", signed(month_change))
-    c4.metric("當月成長率", pct_text(month_growth))
+    c1.metric("月初基準資產", money(s["start"]))
+    c2.metric("月末／最新資產", money(s["end"]))
+    c3.metric("當月增減", signed(s["change"]))
+    c4.metric("當月成長率", pct_text(s["growth"]))
 
-    lookup = {int(row["日期_dt"].day): row for _, row in month_df.iterrows()}
-    weeks = calendar.Calendar(firstweekday=6).monthdayscalendar(y, m)  # Sunday first
-    st.markdown('<div class="calendar-grid">' + ''.join([f'<div class="cal-head">{d}</div>' for d in ["日","一","二","三","四","五","六"]]) + '</div>', unsafe_allow_html=True)
-    html = '<div class="calendar-grid">'
+    lookup = {int(r["日期_dt"].day): r for _, r in month_df.iterrows()}
+    weeks = calendar.Calendar(firstweekday=6).monthdayscalendar(y, m)
+    heads = ''.join(f'<div class="cal-head">{x}</div>' for x in ["日","一","二","三","四","五","六"])
+    html_cells = []
     for week in weeks:
         for d in week:
             if d == 0:
-                html += '<div class="cal-cell cal-empty"></div>'
+                html_cells.append('<div class="cal-cell" style="opacity:.22"></div>')
             elif d in lookup:
-                row = lookup[d]
-                gain = int(row["每日增減"])
-                gain_cls = "gain" if gain >= 0 else "loss"
-                html += f'<div class="cal-cell"><div class="cal-day">{d}</div><div>總：{money(row["總資產"])}</div><div class="{gain_cls}">{signed(gain)}</div></div>'
+                r = lookup[d]
+                cls = "gain" if int(r["每日增減"]) >= 0 else "loss"
+                html_cells.append(f'<div class="cal-cell"><div class="cal-day">{d}</div><div>總 {money(r["總資產"])}</div><div class="{cls}">{signed(r["每日增減"])}</div></div>')
             else:
-                html += f'<div class="cal-cell"><div class="cal-day">{d}</div></div>'
-    html += '</div>'
-    st.markdown(html, unsafe_allow_html=True)
+                html_cells.append(f'<div class="cal-cell"><div class="cal-day">{d}</div></div>')
+    st.markdown(f'<div class="calendar-grid">{heads}{"".join(html_cells)}</div>', unsafe_allow_html=True)
 
+# ---------- App 啟動 ----------
+cfg = load_config()
+APP_TITLE = str(cfg.get("app_name") or DEFAULT_APP_TITLE)
+APP_ICON = str(cfg.get("app_icon") or DEFAULT_APP_ICON)
+THEME = cfg.get("theme") if cfg.get("theme") in THEMES else "黑金尊爵版"
 
-# State / top navigation
-if "theme" not in st.session_state:
-    st.session_state.theme = APP_CONFIG.get("theme", "黑金尊爵版") if APP_CONFIG.get("theme") in THEMES else "黑金尊爵版"
+st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide", initial_sidebar_state="collapsed")
+inject_css(THEME)
+
 if "page" not in st.session_state:
-    st.session_state.page = "首頁總覽"
+    st.session_state.page = "首頁"
+if "edit_date" not in st.session_state:
+    st.session_state.edit_date = now_tw().date()
 
-inject_css(st.session_state.theme)
-
-# Load fresh each rerun
 raw_df = load_data()
 edf = enrich(raw_df)
+last_record_date = edf.iloc[-1]["日期"] if not edf.empty else None
+sync_text = "已同步" if github_enabled() else "未設定"
 
-st.title(f"{APP_ICON} {APP_TITLE}")
-st.caption(APP_VERSION)
-nav_pages = ["首頁總覽", "新增／修改", "歷史紀錄", "月曆", "匯入／匯出", "設定", "使用說明"]
-st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
-nav_cols = st.columns(len(nav_pages))
-for i, nav in enumerate(nav_pages):
+st.markdown(f"""
+<div class="app-head">
+  <div class="app-title">{html.escape(APP_ICON)} {html.escape(APP_TITLE)}</div>
+  <div class="sync-top">{now_tw().strftime('%Y/%m/%d %H:%M')}<br>永久保存：GitHub <span class="sync-dot">●</span></div>
+</div>
+""", unsafe_allow_html=True)
+
+NAV = ["首頁", "新增／修改", "月報表", "年報表", "日曆", "圖表", "匯入／匯出", "設定"]
+nav_cols = st.columns(len(NAV))
+for i, label in enumerate(NAV):
     with nav_cols[i]:
-        label = ("✅ " if st.session_state.page == nav else "") + nav
-        if st.button(label, key=f"nav_{nav}", use_container_width=True):
-            st.session_state.page = nav
+        show = ("🏠 " if label == "首頁" else "") + label
+        if st.button(show, key=f"nav_{label}", use_container_width=True, type="primary" if st.session_state.page == label else "secondary"):
+            st.session_state.page = label
             st.rerun()
-st.markdown('</div>', unsafe_allow_html=True)
-
-with st.expander("🎨 介面配色", expanded=False):
-    theme_choice = st.radio("選擇配色", list(THEMES.keys()), index=list(THEMES.keys()).index(st.session_state.theme), horizontal=True)
-    if theme_choice != st.session_state.theme:
-        st.session_state.theme = theme_choice
-        cfg = load_config()
-        cfg["theme"] = theme_choice
-        save_config(cfg)
-        st.rerun()
 
 page = st.session_state.page
 
-with st.expander("☁️ GitHub 永久保存狀態", expanded=False):
-    if github_enabled():
-        g = github_settings()
-        st.success(f"已啟用 GitHub 自動同步：{g['repo']} / {g['branch']} / {g['data_path']}")
-        st.caption(f"{APP_VERSION}｜每次新增、修改、刪除、匯入資料，都會自動 Commit 到 GitHub 的 data.csv，並自動備份到 backup/。")
-    else:
-        st.error("尚未啟用 GitHub 自動同步。為避免資料再次消失，本版本在未設定 Secrets 前不會儲存新資料。")
-        st.caption("請到 Streamlit Cloud → App → Settings → Secrets，設定 GITHUB_TOKEN、GITHUB_REPO、GITHUB_BRANCH。")
-
-if page == "首頁總覽":
+# ---------- 首頁 ----------
+if page == "首頁":
     if edf.empty:
-        st.warning("目前沒有資料，請先到『新增／修改』輸入第一筆紀錄。")
+        st.warning("目前尚無資產紀錄。請到『新增／修改』建立第一筆資料。")
     else:
+        fam = current_stats(edf, "總資產")
+        family_strip(fam)
+
+        person_stats = {p: current_stats(edf, f"{p}總資產") for p in PEOPLE}
+        cols = st.columns(4)
+        for col, p in zip(cols, PEOPLE):
+            with col:
+                person_card(p, person_stats[p])
+                with st.expander("查看明細"):
+                    latest = edf.iloc[-1]
+                    st.write(f"基金：{money(latest[f'{p}基金'])}")
+                    st.write(f"美股：{money(latest[f'{p}美股'])}")
+                    st.write(f"台股：{money(latest[f'{p}台股'])}")
+                    if st.button("更新這一天", key=f"home_edit_{p}", use_container_width=True):
+                        st.session_state.edit_date = last_record_date or now_tw().date()
+                        st.session_state.page = "新增／修改"
+                        st.rerun()
+
+        chart_left, chart_right = st.columns([1, 2])
+        with chart_left:
+            st.markdown('<div class="panel"><div class="panel-title">資產分布（依類別）</div>', unsafe_allow_html=True)
+            fig = plot_asset_distribution(edf)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.markdown('</div>', unsafe_allow_html=True)
+        with chart_right:
+            st.markdown('<div class="panel"><div class="panel-title">家庭總資產走勢（近 12 個月）</div>', unsafe_allow_html=True)
+            fig = plot_total_trend(edf, 12)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # 記錄狀態：最新一日四人都視為已紀錄，因為每筆日資料包含四人欄位。
         latest = edf.iloc[-1]
-        today_gain = int(latest["每日增減"])
-        month_gain = current_period_gain(edf, "month")
-        year_gain = current_period_gain(edf, "year")
-        history_gain = all_history_gain(edf)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("目前總資產", money(latest["總資產"]))
-        c2.metric("較前一筆", signed(today_gain))
-        c3.metric("本月增減", signed(month_gain))
-        c4.metric("本年增減", signed(year_gain))
-        c5.metric("歷年累計增減", signed(history_gain))
+        recorded_people = sum(any(int(latest[f"{p}{a}"]) != 0 for a in ASSET_TYPES) for p in PEOPLE)
+        last_backup = "自動建立"
+        st.markdown(f"""
+        <div class="status-grid">
+          <div class="status-item"><div class="status-title">今日記錄狀態</div><div class="status-big">已記錄：{recorded_people} 人</div><div>未記錄：{4-recorded_people} 人</div></div>
+          <div class="status-item"><div class="status-title">最新記錄日</div><div class="status-big">{last_record_date.strftime('%Y/%m/%d')}</div><div>點日期可修改</div></div>
+          <div class="status-item"><div class="status-title">GitHub 同步狀態</div><div class="status-big">{sync_text}</div><div>{now_tw().strftime('%Y/%m/%d %H:%M')}</div></div>
+          <div class="status-item"><div class="status-title">備份狀態</div><div class="status-big">每次儲存自動備份</div><div>另可手動匯出至電腦</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.caption("資料永久保存於 GitHub・每次儲存自動備份・歷史版本可還原")
 
-        st.caption("歷年累計增減＝從第一筆紀錄開始，逐日累計『與前一天相比』的總變化；第一筆沒有前一天，因此從 0 開始計算。")
-
-        st.markdown("### 四人資產與每日變化歷史統計")
-        # 手機友善 2×2 大卡片排列：第一排 憲、萱；第二排 傑、文
-        row1 = st.columns(2)
-        for i, p in enumerate(PEOPLE[:2]):
-            with row1[i]:
-                person_card(p, money(latest[p]), person_daily_stats(edf, p))
-        row2 = st.columns(2)
-        for i, p in enumerate(PEOPLE[2:]):
-            with row2[i]:
-                person_card(p, money(latest[p]), person_daily_stats(edf, p))
-
-        st.markdown("### 總資產走勢")
-        fig = px.line(edf, x="日期_dt", y="總資產", markers=True, labels={"日期_dt":"日期", "總資產":"總資產"})
-        fig.update_traces(line=dict(color=TOTAL_COLOR, width=3), marker=dict(size=7, color=TOTAL_COLOR))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("### 總資產歷年增減")
-        year_summary = annual_total_changes(edf)
-        if not year_summary.empty:
-            fig_year = px.bar(year_summary, x="年度", y="年增減", text="年增減", labels={"年增減":"年度增減"})
-            fig_year.update_traces(marker_color=TOTAL_COLOR, texttemplate="%{text:,}", textposition="outside")
-            fig_year.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
-            st.plotly_chart(fig_year, use_container_width=True)
-
-        st.markdown("### 個人資產走勢")
-        long = edf.melt(id_vars=["日期_dt"], value_vars=PEOPLE, var_name="姓名", value_name="資產")
-        fig2 = px.line(long, x="日期_dt", y="資產", color="姓名", markers=True, labels={"日期_dt":"日期"}, color_discrete_map=PERSON_COLORS)
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark")
-        st.plotly_chart(fig2, use_container_width=True)
-
-        st.markdown("### 個人歷年累計增減")
-        person_history = pd.DataFrame([{"姓名": p, "歷年累計增減": person_history_gain(edf, p)} for p in PEOPLE])
-        fig3 = px.bar(person_history, x="姓名", y="歷年累計增減", text="歷年累計增減", color="姓名", color_discrete_map=PERSON_COLORS)
-        fig3.update_traces(texttemplate="%{text:,}", textposition="outside")
-        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), template="plotly_dark", showlegend=False)
-        st.plotly_chart(fig3, use_container_width=True)
-        st.dataframe(person_history, use_container_width=True, hide_index=True)
-
+# ---------- 新增 / 修改 ----------
 elif page == "新增／修改":
-    st.subheader("新增或修改每日紀錄")
-    st.info("選到已經有紀錄的日期時，當天已儲存的基金／美股／台股金額會自動帶出；只要修改需要變更的欄位再儲存即可，不會把其他已存在數值變成 0。")
+    st.subheader("新增／修改每日資產")
+    selected_date = st.date_input("日期", value=st.session_state.edit_date, key="record_date", format="YYYY/MM/DD")
+    st.session_state.edit_date = selected_date
 
-    # 日期放在表單外，讓使用者切換日期時頁面立即重跑並載入該日既有資料。
-    # 使用日期專屬 widget key，避免 Streamlit 沿用前一個日期的輸入狀態而蓋掉既有紀錄。
-    selected_date = st.date_input("日期", value=date.today(), key="record_date")
-
-    # 用 YYYY-MM-DD 字串比對，避免 Python date / pandas Timestamp 型別不同造成明明有資料卻找不到。
-    selected_date_str = selected_date.strftime("%Y-%m-%d")
-    raw_date_str = pd.to_datetime(raw_df["日期"], errors="coerce").dt.strftime("%Y-%m-%d") if not raw_df.empty else pd.Series(dtype=str)
-    existing = raw_df.loc[raw_date_str == selected_date_str].copy() if not raw_df.empty else raw_df.iloc[0:0].copy()
+    existing = raw_df[raw_df["日期"] == selected_date]
     has_existing = not existing.empty
-
-    defaults = {}
-    for p in PEOPLE:
-        for asset in ASSET_TYPES:
-            col = f"{p}{asset}"
-            defaults[col] = int(existing.iloc[-1][col]) if has_existing and col in existing.columns else 0
-
-    # 每個日期使用完全獨立的 widget key，並直接把 GitHub data.csv 中該日數值
-    # 當成 number_input 的 value。這樣不依賴 session_state 灌值時機，切換日期一定會帶出資料。
+    existing_row = existing.iloc[-1] if has_existing else None
     if has_existing:
-        st.success(f"✅ 已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄。下面欄位就是當天已儲存的數值，可直接補登或修改。")
-        st.caption("已讀取資料：" + "｜".join([f"{p} {money(sum(defaults.get(f'{p}{a}', 0) for a in ASSET_TYPES))}" for p in PEOPLE]))
+        st.success(f"已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄，可直接修改。")
     else:
-        st.caption(f"{selected_date.strftime('%Y/%m/%d')} 尚無紀錄，將建立新的一筆。")
+        st.info("這一天尚無紀錄，將建立新資料。")
 
-    with st.form(f"edit_form_{selected_date_str}"):
-        inputs = {}
+    values: dict[str, int] = {}
+    with st.form(f"asset_form_{selected_date.isoformat()}"):
         for p in PEOPLE:
             st.markdown(f"### {p}")
-            cols = st.columns(3)
-            for i, asset in enumerate(ASSET_TYPES):
-                col = f"{p}{asset}"
-                widget_key = f"edit_{selected_date_str}_{col}"
-                with cols[i]:
-                    inputs[col] = st.number_input(
-                        f"{p}｜{asset}金額",
-                        value=int(defaults.get(col, 0)),
-                        step=1,
-                        format="%d",
-                        key=widget_key,
-                    )
-            st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
+            c1, c2, c3 = st.columns(3)
+            for col, asset in zip((c1,c2,c3), ASSET_TYPES):
+                key = f"{p}{asset}"
+                default = int(existing_row[key]) if has_existing else 0
+                with col:
+                    values[key] = int(st.number_input(f"{p}｜{asset}金額", value=default, step=1000, key=f"input_{selected_date.isoformat()}_{key}"))
+            st.caption(f"{p} 小計：{money(sum(values[f'{p}{a}'] for a in ASSET_TYPES))}")
+        submitted = st.form_submit_button("更新這一天" if has_existing else "儲存這一天", use_container_width=True)
 
-        submit_label = "💾 更新這一天" if has_existing else "💾 儲存這一天"
-        submitted = st.form_submit_button(submit_label, type="primary", use_container_width=True)
-        if submitted:
-            # upsert 會以同日期覆蓋，但 inputs 已先從該日既有資料完整載入，因此只改其中幾欄時，其他欄位仍會保留。
-            new_df = upsert_record(raw_df, selected_date, {col: int(inputs[col]) for col in DETAIL_COLUMNS})
-            ok, msg = save_data(new_df)
+    if submitted:
+        new_df = upsert_record(raw_df, selected_date, values)
+        ok, msg = save_data(new_df, "update" if has_existing else "new")
+        if ok:
+            st.success(msg)
+            st.session_state.edit_date = selected_date
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            st.error(msg)
+
+    if has_existing:
+        st.divider()
+        st.warning("刪除會影響所有統計；系統會先建立備份再刪除。")
+        if st.button("刪除這一天紀錄", key=f"delete_{selected_date.isoformat()}"):
+            deleted = raw_df[raw_df["日期"] != selected_date]
+            ok, msg = save_data(deleted, "delete")
             if ok:
-                st.success(msg)
+                st.success("已刪除並完成永久保存與備份。")
                 st.rerun()
             else:
                 st.error(msg)
 
-    st.divider()
-    st.subheader("刪除單日紀錄")
-    if raw_df.empty:
-        st.caption("目前沒有資料可刪除。")
-    else:
-        dates = [d.strftime("%Y-%m-%d") for d in raw_df["日期"]]
-        del_date = st.selectbox("選擇要刪除的日期", dates, index=len(dates)-1)
-        if st.button("刪除選取日期", type="secondary"):
-            new_df = raw_df[pd.to_datetime(raw_df["日期"]).dt.strftime("%Y-%m-%d") != del_date]
-            ok, msg = save_data(new_df)
-            if ok:
-                st.success(f"已刪除 {del_date}，{msg}")
-                st.rerun()
-            else:
-                st.error(msg)
-
-elif page == "歷史紀錄":
-    st.subheader("歷史紀錄與報表")
-    if edf.empty:
+# ---------- 月報表 ----------
+elif page == "月報表":
+    st.subheader("月報表")
+    report = monthly_report(edf)
+    if report.empty:
         st.info("尚無資料。")
     else:
-        show = edf[["日期", *DETAIL_COLUMNS, *PEOPLE, "總資產", "每日增減"]].copy()
-        show["日期"] = pd.to_datetime(show["日期"]).dt.strftime("%Y-%m-%d")
-        st.dataframe(show.sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
-        st.markdown("### 月報表")
-        month = edf.groupby("月份").agg(月初總資產=("總資產", "first"), 月末總資產=("總資產", "last"))
-        month["月增減"] = month["月末總資產"] - month["月初總資產"]
-        month["月成長率"] = (month["月增減"] / month["月初總資產"].replace(0, pd.NA) * 100).fillna(0).round(2)
-        month_show = month.reset_index().sort_values("月份", ascending=False)
-        month_show["月增減"] = month_show["月增減"].apply(signed)
-        month_show["月成長率"] = month_show["月成長率"].apply(pct_text)
-        st.dataframe(month_show, use_container_width=True, hide_index=True)
-        st.markdown("### 年報表")
-        year = annual_total_changes(edf)
-        year_show = year.sort_values("年度", ascending=False).copy()
-        year_show["年增減"] = year_show["年增減"].apply(signed)
-        year_show["年成長率"] = year_show["年成長率"].apply(pct_text)
-        st.dataframe(year_show, use_container_width=True, hide_index=True)
+        show = report.copy()
+        show["月末總資產"] = show["月末總資產"].map(money)
+        show["增減"] = show["增減"].map(signed)
+        show["成長率"] = show["成長率"].map(pct_text)
+        st.dataframe(show.iloc[::-1], use_container_width=True, hide_index=True)
+        fig = px.bar(report, x="月份", y="增減", text=report["成長率"].map(pct_text))
+        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd", height=380)
+        st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("### 從第一筆紀錄開始的每日增減累計")
-        cumulative = edf[["日期", "總資產", "每日增減", *[f"{p}增減" for p in PEOPLE]]].copy()
-        cumulative["總資產累計增減"] = cumulative["每日增減"].cumsum()
-        for p in PEOPLE:
-            cumulative[f"{p}累計增減"] = cumulative[f"{p}增減"].cumsum()
-        cumulative["日期"] = pd.to_datetime(cumulative["日期"]).dt.strftime("%Y-%m-%d")
-        st.dataframe(cumulative.sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
+# ---------- 年報表 ----------
+elif page == "年報表":
+    st.subheader("年報表")
+    report = yearly_report(edf)
+    if report.empty:
+        st.info("尚無資料。")
+    else:
+        show = report.copy()
+        show["年末總資產"] = show["年末總資產"].map(money)
+        show["增減"] = show["增減"].map(signed)
+        show["成長率"] = show["成長率"].map(pct_text)
+        st.dataframe(show.iloc[::-1], use_container_width=True, hide_index=True)
+        fig = px.bar(report, x="年度", y="增減", text=report["成長率"].map(pct_text))
+        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f7f0dd", height=380)
+        st.plotly_chart(fig, use_container_width=True)
 
-elif page == "月曆":
-    st.subheader("月曆顯示")
+# ---------- 日曆 ----------
+elif page == "日曆":
+    st.subheader("資產日曆")
+    if st.button("📍 回到今天"):
+        st.session_state.page = "新增／修改"
+        st.session_state.edit_date = now_tw().date()
+        st.rerun()
     render_calendar(edf)
+    st.caption("假日沒有紀錄不影響統計；每日增減會與『上一筆有紀錄的日期』比較。")
 
+# ---------- 圖表 ----------
+elif page == "圖表":
+    st.subheader("資產走勢")
+    period_label = st.segmented_control("顯示範圍", ["近30天", "近3個月", "近1年", "全部"], default="近1年")
+    months_map = {"近30天": 1, "近3個月": 3, "近1年": 12, "全部": None}
+    months = months_map.get(period_label, 12)
+    st.markdown("### 家庭總資產")
+    fig = plot_total_trend(edf, months)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+    st.markdown("### 四人資產走勢")
+    fig = plot_people(edf, months)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+
+# ---------- 匯入 / 匯出 ----------
 elif page == "匯入／匯出":
     st.subheader("匯出備份")
-    if raw_df.empty:
-        st.info("尚無資料可匯出。")
-    else:
-        csv_bytes = raw_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-        st.download_button("下載 CSV", csv_bytes, file_name="family_asset_records.csv", mime="text/csv")
-        st.download_button("下載 Excel", to_excel_bytes(raw_df), file_name="family_asset_records.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption("建議每週至少下載一次完整備份到自己的電腦。")
+    e1, e2 = st.columns(2)
+    with e1:
+        st.download_button("下載完整 CSV 備份", data=dataframe_to_csv_bytes(raw_df), file_name=f"family_asset_backup_{now_tw().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+    with e2:
+        st.download_button("下載完整 Excel 備份", data=excel_bytes(raw_df), file_name=f"family_asset_backup_{now_tw().strftime('%Y%m%d_%H%M%S')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
     st.divider()
-    st.subheader("匯入 CSV")
-    st.warning("匯入後會覆蓋目前 data.csv。請先下載備份。")
-    uploaded = st.file_uploader("選擇 CSV 檔。新版欄位可包含：日期、憲基金、憲台股、憲美股...；舊版日期、憲、萱、傑、文也可匯入。", type=["csv"])
+    st.subheader("匯入 / 還原")
+    uploaded = st.file_uploader("選擇 CSV 或 Excel 備份檔", type=["csv", "xlsx", "xls"])
+    mode = st.radio("匯入方式", ["合併匯入（同日期以匯入檔為準）", "完整覆蓋還原"], horizontal=True)
     if uploaded is not None:
-        if st.button("確認匯入並覆蓋"):
-            content = uploaded.getvalue()
-            imported = None
-            for enc in ["utf-8-sig", "utf-8", "big5", "cp950"]:
-                try:
-                    imported = pd.read_csv(BytesIO(content), encoding=enc)
-                    break
-                except Exception:
-                    continue
-            if imported is None:
-                st.error("讀取失敗，請確認 CSV 編碼。")
-            else:
-                if "日期" not in imported.columns:
-                    st.error("缺少欄位：日期")
+        try:
+            incoming = parse_import(uploaded)
+            st.info(f"已讀取 {len(incoming)} 筆日期資料：{incoming['日期'].min() if not incoming.empty else '-'} ～ {incoming['日期'].max() if not incoming.empty else '-'}")
+            if st.button("確認匯入並永久保存", type="primary"):
+                target = merge_import(raw_df, incoming) if mode.startswith("合併") else incoming
+                ok, msg = save_data(target, "import")
+                if ok:
+                    st.success(msg)
+                    st.rerun()
                 else:
-                    # 舊版欄位「憲、萱、傑、文」會匯入到基金；新版欄位直接保留。
-                    for p in PEOPLE:
-                        fund_col = f"{p}基金"
-                        if fund_col not in imported.columns:
-                            imported[fund_col] = imported[p] if p in imported.columns else 0
-                        for asset in ["台股", "美股"]:
-                            col = f"{p}{asset}"
-                            if col not in imported.columns:
-                                imported[col] = 0
-                    imported = imported[COLUMNS].copy()
-                    imported["日期"] = pd.to_datetime(imported["日期"], errors="coerce").dt.date
-                    imported = imported.dropna(subset=["日期"])
-                    for col in DETAIL_COLUMNS:
-                        imported[col] = pd.to_numeric(imported[col], errors="coerce").fillna(0).astype(int)
-                    imported = imported.sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
-                    ok, msg = save_data(imported)
+                    st.error(msg)
+        except Exception as exc:
+            st.error(f"匯入失敗：{exc}")
+
+    st.divider()
+    st.subheader("GitHub 自動備份還原")
+    backups, err = github_list_backups()
+    if err:
+        st.warning(err)
+    elif not backups:
+        st.info("目前 GitHub backup/ 尚無備份檔。")
+    else:
+        options = {x["name"]: x["path"] for x in backups[:100]}
+        picked = st.selectbox("選擇歷史備份", list(options.keys()))
+        st.warning("還原歷史備份會取代目前 data.csv；執行前系統會先備份目前資料。")
+        if st.button("還原這份 GitHub 備份"):
+            path = options[picked]
+            content, _, get_err = github_get_file(path)
+            if get_err or not content:
+                st.error(get_err or "無法讀取備份")
+            else:
+                try:
+                    old_df = normalize_df(pd.read_csv(BytesIO(content), encoding="utf-8-sig"))
+                    # 先額外備份目前資料，再覆蓋。
+                    make_backup(dataframe_to_csv_bytes(raw_df), "before_restore")
+                    ok, msg = save_data(old_df, "restore")
                     if ok:
-                        st.success(f"匯入完成，{msg}")
+                        st.success(f"已還原：{picked}")
                         st.rerun()
                     else:
                         st.error(msg)
+                except Exception as exc:
+                    st.error(f"還原失敗：{exc}")
 
+# ---------- 設定 ----------
 elif page == "設定":
-    st.subheader("APP 名稱設定")
-    st.caption("可以自己命名首頁標題，也可以更換前方 Emoji。儲存後會同步到瀏覽器標題，手機加入主畫面時也會用新的名稱。")
-    cfg = load_config()
-    with st.form("app_config_form"):
-        new_icon = st.text_input("APP 圖示 Emoji", value=str(cfg.get("app_icon", DEFAULT_APP_ICON)), max_chars=4)
-        new_name = st.text_input("APP 名稱", value=str(cfg.get("app_name", DEFAULT_APP_TITLE)))
-        save_btn = st.form_submit_button("儲存 APP 名稱")
-        if save_btn:
-            cfg["app_icon"] = new_icon.strip() or DEFAULT_APP_ICON
-            cfg["app_name"] = new_name.strip() or DEFAULT_APP_TITLE
-            cfg["theme"] = st.session_state.theme
-            save_config(cfg)
-            st.success("已儲存 APP 名稱。頁面即將重新整理。")
+    st.subheader("系統設定")
+    with st.form("settings_form"):
+        new_name = st.text_input("APP 名稱", value=APP_TITLE)
+        new_icon = st.text_input("APP 圖示 Emoji", value=APP_ICON, max_chars=4)
+        new_theme = st.radio("介面配色", list(THEMES.keys()), index=list(THEMES.keys()).index(THEME), horizontal=True)
+        save_settings = st.form_submit_button("儲存設定")
+    if save_settings:
+        new_cfg = {"app_name": new_name.strip() or DEFAULT_APP_TITLE, "app_icon": new_icon.strip() or DEFAULT_APP_ICON, "theme": new_theme}
+        ok, msg = save_config(new_cfg)
+        if ok:
+            st.success("設定已永久保存，重新整理後套用。")
             st.rerun()
+        else:
+            st.error(msg)
 
-    st.markdown("### 預覽")
-    card("目前 APP 標題", f"{str(cfg.get('app_icon', DEFAULT_APP_ICON))} {str(cfg.get('app_name', DEFAULT_APP_TITLE))}")
-
-else:
-    st.subheader("使用說明")
-    st.markdown("""
-    1. 到 **新增／修改** 輸入每天四個人的基金、台股、美股金額：憲、萱、傑、文，日期會自動帶出今天，且金額可輸入負數。  
-    2. 同一天重新儲存會直接覆蓋舊數字。  
-    3. 首頁會自動計算總資產、較前一筆、本月、本年增減；月報表與年報表會顯示增減金額與成長率%；月曆會依照月份選單顯示當月增減與成長率。基金＋台股＋美股會全部統計在一起。  
-    4. **匯入／匯出** 可下載 CSV / Excel 備份。  
-    5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
-
-    v6.1 Ultimate 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv，並建立 backup 備份；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
-    """)
+    st.divider()
+    st.subheader("系統狀態")
+    st.write(f"版本：**{APP_VERSION}**")
+    if github_enabled():
+        g = github_settings()
+        st.success(f"GitHub 永久保存已啟用：{g['repo']} / {g['branch']} / {g['data_path']}")
+    else:
+        st.error("GitHub 永久保存未啟用。")
+    st.caption("此版本沿用既有 data.csv 欄位，不需要搬移或重建歷史資料。")
