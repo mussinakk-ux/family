@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_VERSION = "v6.1 Ultimate"
+APP_VERSION = "v6.2 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 CONFIG_FILE = Path("config.json")
@@ -680,21 +680,32 @@ elif page == "新增／修改":
     # 日期放在表單外，讓使用者切換日期時頁面立即重跑並載入該日既有資料。
     # 使用日期專屬 widget key，避免 Streamlit 沿用前一個日期的輸入狀態而蓋掉既有紀錄。
     selected_date = st.date_input("日期", value=date.today(), key="record_date")
-    existing = raw_df[raw_df["日期"] == selected_date]
+
+    # 用 YYYY-MM-DD 字串比對，避免 Python date / pandas Timestamp 型別不同造成明明有資料卻找不到。
+    selected_date_str = selected_date.strftime("%Y-%m-%d")
+    raw_date_str = pd.to_datetime(raw_df["日期"], errors="coerce").dt.strftime("%Y-%m-%d") if not raw_df.empty else pd.Series(dtype=str)
+    existing = raw_df.loc[raw_date_str == selected_date_str].copy() if not raw_df.empty else raw_df.iloc[0:0].copy()
     has_existing = not existing.empty
-    if has_existing:
-        st.success(f"已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄，可直接修改後再儲存。")
-    else:
-        st.caption(f"{selected_date.strftime('%Y/%m/%d')} 尚無紀錄，將建立新的一筆。")
 
     defaults = {}
     for p in PEOPLE:
         for asset in ASSET_TYPES:
             col = f"{p}{asset}"
-            defaults[col] = int(existing.iloc[0][col]) if has_existing and col in existing.columns else 0
+            defaults[col] = int(existing.iloc[-1][col]) if has_existing and col in existing.columns else 0
 
-    date_key = selected_date.isoformat()
-    with st.form(f"edit_form_{date_key}"):
+    # 日期一變更，就把該日資料主動灌進輸入元件的 session_state。
+    # 使用固定 widget key，確保切換日期時一定更新，不會殘留前一個日期的 0 或舊值。
+    if st.session_state.get("_edit_loaded_date") != selected_date_str:
+        for col in DETAIL_COLUMNS:
+            st.session_state[f"edit_{col}"] = int(defaults.get(col, 0))
+        st.session_state["_edit_loaded_date"] = selected_date_str
+
+    if has_existing:
+        st.success(f"✅ 已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄。下面欄位就是當天已儲存的數值，可直接補登或修改。")
+    else:
+        st.caption(f"{selected_date.strftime('%Y/%m/%d')} 尚無紀錄，將建立新的一筆。")
+
+    with st.form("edit_form"):
         inputs = {}
         for p in PEOPLE:
             st.markdown(f"### {p}")
@@ -705,9 +716,8 @@ elif page == "新增／修改":
                     inputs[col] = st.number_input(
                         f"{p}｜{asset}金額",
                         step=1,
-                        value=defaults[col],
                         format="%d",
-                        key=f"input_{date_key}_{col}",
+                        key=f"edit_{col}",
                     )
             st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
 
