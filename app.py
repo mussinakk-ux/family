@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-APP_VERSION = "v7.0 Ultimate"
+APP_VERSION = "v7.1 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -448,8 +448,23 @@ def inject_css(theme_name: str) -> None:
       .sync-top {{text-align:right;color:{t['muted']};font-size:13px;line-height:1.5;}}
       .sync-dot {{color:#65d36e;}}
       .top-nav {{margin:4px 0 12px;}}
-      .stButton>button {{border:1px solid {t['border']};border-radius:10px;background:{t['panel']};color:{t['text']};font-weight:800;min-height:42px;}}
-      .stButton>button:hover {{border-color:{t['gold']};color:{t['gold']};box-shadow:0 0 14px rgba(228,184,67,.25);}}
+      .stButton>button {{border:1px solid {t['border']};border-radius:10px;background:{t['panel']};color:#FFFFFF!important;font-weight:800;min-height:42px;}}
+      .stButton>button * {{color:#FFFFFF!important;}}
+      .stButton>button:hover {{border-color:{t['gold']};color:{t['gold']}!important;box-shadow:0 0 14px rgba(228,184,67,.25);}}
+      .stButton>button:hover * {{color:{t['gold']}!important;}}
+      /* 所有深色區塊的操作文字維持高對比 */
+      div[data-testid="stSegmentedControl"] {{border-radius:10px;overflow:hidden;}}
+      div[data-testid="stSegmentedControl"] button {{background:#151515!important;border-color:{t['border']}!important;color:#FFFFFF!important;}}
+      div[data-testid="stSegmentedControl"] button * {{color:#FFFFFF!important;opacity:1!important;}}
+      div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {{background:{t['gold']}!important;color:#111111!important;}}
+      div[data-testid="stSegmentedControl"] button[aria-pressed="true"] * {{color:#111111!important;}}
+      div[data-testid="stSelectbox"] label, div[data-testid="stDateInput"] label, div[data-testid="stNumberInput"] label, div[data-testid="stTextInput"] label, div[data-testid="stFileUploader"] label, div[data-testid="stRadio"] label {{color:#FFFFFF!important;opacity:1!important;}}
+      div[data-testid="stSelectbox"] [data-baseweb="select"] > div, div[data-testid="stDateInput"] input, div[data-testid="stNumberInput"] input, div[data-testid="stTextInput"] input {{background:#F5F6FA!important;color:#111111!important;}}
+      div[data-testid="stSelectbox"] [data-baseweb="select"] *, div[data-testid="stDateInput"] input, div[data-testid="stNumberInput"] input, div[data-testid="stTextInput"] input {{color:#111111!important;opacity:1!important;}}
+      div[data-testid="stExpander"] summary, div[data-testid="stExpander"] summary * {{color:#FFFFFF!important;opacity:1!important;}}
+      div[role="radiogroup"] label, div[role="radiogroup"] label * {{color:#FFFFFF!important;opacity:1!important;}}
+      .stDownloadButton>button, .stDownloadButton>button * {{color:#FFFFFF!important;}}
+      .stDownloadButton>button:hover, .stDownloadButton>button:hover * {{color:{t['gold']}!important;}}
       div[data-testid="stFormSubmitButton"] button {{background:linear-gradient(135deg,#00e676,#ffd54f)!important;color:#000!important;border:2px solid #fff!important;font-size:19px!important;font-weight:900!important;min-height:56px!important;}}
       .family-strip {{display:grid;grid-template-columns:1.35fr repeat(4,1fr);border:1px solid {t['border']};border-radius:16px;overflow:hidden;background:linear-gradient(120deg,{t['panel2']},{t['panel']});margin:6px 0 16px;}}
       .family-cell {{padding:18px 18px;border-right:1px solid rgba(228,184,67,.35);text-align:center;}}
@@ -460,14 +475,17 @@ def inject_css(theme_name: str) -> None:
       .metric-pct {{font-size:15px;font-weight:900;margin-top:4px;}}
       .gain {{color:{t['good']}!important;font-weight:850;}}
       .loss {{color:{t['bad']}!important;font-weight:850;}}
-      .person-card {{border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,.65);box-shadow:0 9px 22px rgba(0,0,0,.22);margin-bottom:8px;color:#101010;}}
-      .person-head {{padding:13px 18px;font-size:25px;font-weight:950;display:flex;gap:10px;align-items:center;}}
-      .person-body {{padding:10px 18px 14px;}}
-      .person-body * {{color:#171717!important;}}
-      .person-asset {{font-size:31px;font-weight:950;margin:3px 0 9px;}}
-      .person-row {{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;border-top:1px solid rgba(0,0,0,.11);padding:7px 0;font-size:14px;}}
-      .person-row .v {{text-align:right;font-weight:850;}}
-      .person-row .p {{text-align:right;font-weight:850;color:#24743a!important;}}
+      .person-card {{border-radius:16px;overflow:hidden;border:1px solid {t['border']};box-shadow:0 9px 22px rgba(0,0,0,.28);margin-bottom:8px;background:linear-gradient(145deg,#141414,#0b0b0b);color:#FFFFFF!important;}}
+      .person-head {{padding:14px 18px;font-size:27px;font-weight:950;color:{t['gold']}!important;border-bottom:1px solid rgba(228,184,67,.35);}}
+      .person-body {{padding:11px 18px 14px;}}
+      .person-body * {{color:#FFFFFF;}}
+      .person-asset {{font-size:31px;font-weight:950;margin:3px 0 9px;color:#FFFFFF!important;}}
+      .person-row {{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;border-top:1px solid rgba(255,255,255,.12);padding:8px 0;font-size:14px;}}
+      .person-row > div:first-child {{color:#F5F5F5!important;}}
+      .person-row .v {{text-align:right;font-weight:900;}}
+      .person-row .p {{text-align:right;font-weight:900;}}
+      .person-row .gain {{color:{t['good']}!important;}}
+      .person-row .loss {{color:{t['bad']}!important;}}
       .panel {{border:1px solid {t['border']};border-radius:16px;background:{t['panel']};padding:14px 16px;margin-bottom:12px;}}
       .panel-title {{color:{t['gold']};font-size:17px;font-weight:900;margin-bottom:8px;}}
       .status-grid {{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid {t['border']};border-radius:16px;background:{t['panel']};overflow:hidden;}}
@@ -517,7 +535,6 @@ def family_strip(stats: dict) -> None:
 
 
 def person_card(person: str, s: dict) -> None:
-    sty = PERSON_STYLE[person]
     rows = []
     for label, key, pkey in [
         ("今日增減", "daily", "daily_pct"),
@@ -526,14 +543,16 @@ def person_card(person: str, s: dict) -> None:
         ("歷年增減", "history", "history_pct"),
     ]:
         cls = "gain" if s[key] >= 0 else "loss"
-        rows.append(f'<div class="person-row"><div>{label}</div><div class="v {cls}">{signed(s[key])}</div><div class="p">{pct_text(s[pkey])}</div></div>')
+        rows.append(
+            f'<div class="person-row"><div>{label}</div>'
+            f'<div class="v {cls}">{signed(s[key])}</div>'
+            f'<div class="p {cls}">{pct_text(s[pkey])}</div></div>'
+        )
     st.markdown(f"""
-    <div class="person-card" style="background:{sty['soft']};border-color:{sty['line']}55;">
-      <div class="person-head" style="color:{sty['dark']};border-bottom:1px solid {sty['line']}44;">
-        <span style="width:36px;height:36px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:{sty['line']};color:white!important;font-size:19px;">{sty['icon']}</span>{person}
-      </div>
+    <div class="person-card">
+      <div class="person-head">{person}</div>
       <div class="person-body">
-        <div style="font-size:13px;">總資產</div>
+        <div style="font-size:13px;color:#F5F5F5!important;">總資產</div>
         <div class="person-asset">$ {money(s['current'])}</div>
         {''.join(rows)}
       </div>
