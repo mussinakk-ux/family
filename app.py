@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_VERSION = "v6.0 Ultimate"
+APP_VERSION = "v6.1 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 CONFIG_FILE = Path("config.json")
@@ -675,18 +675,26 @@ if page == "首頁總覽":
 
 elif page == "新增／修改":
     st.subheader("新增或修改每日紀錄")
-    st.info("同一天重新儲存會自動覆蓋舊資料。每個人的總資產會自動加總：基金＋台股＋美股；金額可輸入正數或負數。")
-    # 新增紀錄時自動帶出今天日期；若今天已有資料，會直接帶出今天的既有數值方便修改。
-    default_date = date.today()
-    selected_date = st.date_input("日期", value=default_date)
+    st.info("選到已經有紀錄的日期時，當天已儲存的基金／美股／台股金額會自動帶出；只要修改需要變更的欄位再儲存即可，不會把其他已存在數值變成 0。")
+
+    # 日期放在表單外，讓使用者切換日期時頁面立即重跑並載入該日既有資料。
+    # 使用日期專屬 widget key，避免 Streamlit 沿用前一個日期的輸入狀態而蓋掉既有紀錄。
+    selected_date = st.date_input("日期", value=date.today(), key="record_date")
     existing = raw_df[raw_df["日期"] == selected_date]
+    has_existing = not existing.empty
+    if has_existing:
+        st.success(f"已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄，可直接修改後再儲存。")
+    else:
+        st.caption(f"{selected_date.strftime('%Y/%m/%d')} 尚無紀錄，將建立新的一筆。")
+
     defaults = {}
     for p in PEOPLE:
         for asset in ASSET_TYPES:
             col = f"{p}{asset}"
-            defaults[col] = int(existing.iloc[0][col]) if not existing.empty and col in existing.columns else 0
+            defaults[col] = int(existing.iloc[0][col]) if has_existing and col in existing.columns else 0
 
-    with st.form("edit_form"):
+    date_key = selected_date.isoformat()
+    with st.form(f"edit_form_{date_key}"):
         inputs = {}
         for p in PEOPLE:
             st.markdown(f"### {p}")
@@ -694,10 +702,19 @@ elif page == "新增／修改":
             for i, asset in enumerate(ASSET_TYPES):
                 col = f"{p}{asset}"
                 with cols[i]:
-                    inputs[col] = st.number_input(f"{p}｜{asset}金額", step=1, value=defaults[col], format="%d", key=f"input_{col}")
+                    inputs[col] = st.number_input(
+                        f"{p}｜{asset}金額",
+                        step=1,
+                        value=defaults[col],
+                        format="%d",
+                        key=f"input_{date_key}_{col}",
+                    )
             st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
-        submitted = st.form_submit_button("💾 儲存這一天", type="primary", use_container_width=True)
+
+        submit_label = "💾 更新這一天" if has_existing else "💾 儲存這一天"
+        submitted = st.form_submit_button(submit_label, type="primary", use_container_width=True)
         if submitted:
+            # upsert 會以同日期覆蓋，但 inputs 已先從該日既有資料完整載入，因此只改其中幾欄時，其他欄位仍會保留。
             new_df = upsert_record(raw_df, selected_date, {col: int(inputs[col]) for col in DETAIL_COLUMNS})
             ok, msg = save_data(new_df)
             if ok:
@@ -836,5 +853,5 @@ else:
     4. **匯入／匯出** 可下載 CSV / Excel 備份。  
     5. 部署到 Streamlit Cloud 後，手機用 Safari / Chrome 打開網址即可加入主畫面。  
 
-    v6.0 Ultimate 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv，並建立 backup 備份；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
+    v6.1 Ultimate 永久保存：設定 GitHub Secrets 後，每次按儲存會自動同步到 GitHub 的 data.csv，並建立 backup 備份；電腦關機或 Streamlit 重新啟動後，仍會讀取 GitHub 最新資料。
     """)
