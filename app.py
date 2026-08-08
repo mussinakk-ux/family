@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_VERSION = "v6.2 Ultimate"
+APP_VERSION = "v6.3 Ultimate"
 DEFAULT_APP_TITLE = "$億萬富翁家庭資產"
 DEFAULT_APP_ICON = "💰"
 CONFIG_FILE = Path("config.json")
@@ -693,31 +693,35 @@ elif page == "新增／修改":
             col = f"{p}{asset}"
             defaults[col] = int(existing.iloc[-1][col]) if has_existing and col in existing.columns else 0
 
-    # 日期一變更，就把該日資料主動灌進輸入元件的 session_state。
-    # 使用固定 widget key，確保切換日期時一定更新，不會殘留前一個日期的 0 或舊值。
-    if st.session_state.get("_edit_loaded_date") != selected_date_str:
+    # 每個日期使用獨立的輸入元件 key。
+    # 這比共用固定 key 更可靠：切換日期時一定會建立/載入該日自己的欄位值，
+    # 不會被前一個日期殘留的 0 或 Streamlit session_state 覆蓋。
+    loaded_marker = f"_edit_loaded_date_v63"
+    if st.session_state.get(loaded_marker) != selected_date_str:
         for col in DETAIL_COLUMNS:
-            st.session_state[f"edit_{col}"] = int(defaults.get(col, 0))
-        st.session_state["_edit_loaded_date"] = selected_date_str
+            widget_key = f"edit_{selected_date_str}_{col}"
+            st.session_state[widget_key] = int(defaults.get(col, 0))
+        st.session_state[loaded_marker] = selected_date_str
 
     if has_existing:
         st.success(f"✅ 已載入 {selected_date.strftime('%Y/%m/%d')} 的既有紀錄。下面欄位就是當天已儲存的數值，可直接補登或修改。")
     else:
         st.caption(f"{selected_date.strftime('%Y/%m/%d')} 尚無紀錄，將建立新的一筆。")
 
-    with st.form("edit_form"):
+    with st.form(f"edit_form_{selected_date_str}"):
         inputs = {}
         for p in PEOPLE:
             st.markdown(f"### {p}")
             cols = st.columns(3)
             for i, asset in enumerate(ASSET_TYPES):
                 col = f"{p}{asset}"
+                widget_key = f"edit_{selected_date_str}_{col}"
                 with cols[i]:
                     inputs[col] = st.number_input(
                         f"{p}｜{asset}金額",
                         step=1,
                         format="%d",
-                        key=f"edit_{col}",
+                        key=widget_key,
                     )
             st.caption(f"{p} 小計：{money(sum(inputs.get(f'{p}{asset}', 0) for asset in ASSET_TYPES))}")
 
